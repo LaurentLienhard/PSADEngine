@@ -332,6 +332,20 @@ process
             Write-Build -Object 'No sequence currently defined for the default task' -ForegroundColor Yellow
         }
 
+        task Import_Module {
+            $modulePath = ".\output\module\PSADEngine\0.0.1\PSADEngine.psd1"
+            if (Test-Path $modulePath) {
+                Write-Host -Object "[build] Importing built module..." -ForegroundColor Magenta
+                Import-Module -FullyQualifiedName $modulePath -Force
+            } else {
+                $fallbackPath = Get-ChildItem -Path ".\output\module" -Filter "PSADEngine.psd1" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($fallbackPath) {
+                    Write-Host -Object "[build] Importing built module..." -ForegroundColor Magenta
+                    Import-Module -FullyQualifiedName $fallbackPath.FullName -Force
+                }
+            }
+        }
+
         Write-Host -Object 'Adding Workflow from configuration:' -ForegroundColor DarkGray
 
         # Load Invoke-Build task sequences/workflows from $BuildInfo.
