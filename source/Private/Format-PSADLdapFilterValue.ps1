@@ -51,6 +51,8 @@ function Format-PSADLdapFilterValue
     {
         if ([System.String]::IsNullOrEmpty($Value))
         {
+            Write-Verbose -Message 'The supplied assertion value was empty. Nothing to escape.'
+
             return [System.String]::Empty
         }
 
@@ -62,6 +64,21 @@ function Format-PSADLdapFilterValue
         $escaped = $escaped -replace '\(', '\28'
         $escaped = $escaped -replace '\)', '\29'
         $escaped = $escaped -replace "`0", '\00'
+
+        <#
+            Only whether the value was rewritten is narrated, never the value itself. An
+            assertion value reaching this function is an account name being used for a Tier 0
+            privilege decision, and an escaping event is the signal worth surfacing because
+            a legitimate sAMAccountName cannot contain an LDAP metacharacter.
+        #>
+        if ($escaped -ceq $Value)
+        {
+            Write-Verbose -Message 'The assertion value contained no RFC 4515 metacharacter and was passed through unchanged.'
+        }
+        else
+        {
+            Write-Verbose -Message 'The assertion value contained one or more RFC 4515 metacharacters and was escaped before being placed in the search filter. A legitimate account name does not contain these characters, so this is worth correlating with the caller.'
+        }
 
         return $escaped
     }

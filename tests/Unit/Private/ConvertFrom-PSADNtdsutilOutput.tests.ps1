@@ -145,5 +145,66 @@ ntdsutil: quit
                     Should -Not -Throw
             }
         }
+
+        Context 'Operator feedback' {
+            It 'Should narrate the parsed verdict and the transcript size' {
+                $verdictParam = @{
+                    StandardOutput = 'Password has been set successfully.'
+                    StandardError  = ''
+                    ExitCode       = 0
+                }
+
+                $verbose = ConvertFrom-PSADNtdsutilOutput @verdictParam -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'Succeeded=True'
+                $verbose | Should -Match 'ExitCode=0'
+                $verbose | Should -Match 'success token matched'
+                $verbose | Should -Match 'character ntdsutil transcript'
+            }
+
+            It 'Should narrate a matched failure signature' {
+                $verdictParam = @{
+                    StandardOutput = 'Setting password failed. Access is denied.'
+                    StandardError  = ''
+                    ExitCode       = 0
+                }
+
+                $verbose = ConvertFrom-PSADNtdsutilOutput @verdictParam -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'Succeeded=False'
+                $verbose | Should -Match 'failure signature matched'
+            }
+
+            It 'Should never echo the raw transcript into the narration' {
+                <#
+                    ntdsutil echoes its prompts on standard output and the captured buffer is
+                    not guaranteed to exclude a typed response on every build, so the raw
+                    text is returned for deliberate logging and never auto-narrated.
+                #>
+                $verdictParam = @{
+                    StandardOutput = 'Password has been set successfully. TRANSCRIPT-MARKER-VALUE'
+                    StandardError  = ''
+                    ExitCode       = 0
+                }
+
+                $verbose = ConvertFrom-PSADNtdsutilOutput @verdictParam -Verbose 4>&1 |
+                    Where-Object { $_ -is [System.Management.Automation.VerboseRecord] } |
+                    Out-String
+
+                $verbose | Should -Not -Match 'TRANSCRIPT-MARKER-VALUE'
+            }
+
+            It 'Should still return the transcript on the object for deliberate logging' {
+                $verdictParam = @{
+                    StandardOutput = 'Password has been set successfully. TRANSCRIPT-MARKER-VALUE'
+                    StandardError  = ''
+                    ExitCode       = 0
+                }
+
+                $result = ConvertFrom-PSADNtdsutilOutput @verdictParam
+
+                $result.Transcript | Should -Match 'TRANSCRIPT-MARKER-VALUE'
+            }
+        }
     }
 }

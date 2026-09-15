@@ -90,6 +90,16 @@ function Test-PSADTier0Privilege
         $matchedSid = $null
         $matchedRole = $null
 
+        $evaluatedSidCount = @($SecurityIdentifier).Where({ -not [System.String]::IsNullOrWhiteSpace($_) }).Count
+
+        <#
+            The narration reports counts and role names only. Security identifiers are never
+            written to any stream: a token group set enumerates the complete privilege
+            topology of a Tier 0 principal and is exactly the reconnaissance an attacker
+            wants from a captured transcript.
+        #>
+        Write-Verbose -Message ('Evaluating {0} security identifier(s) for Tier 0 membership by well known relative identifier. The identifiers themselves are not narrated.' -f $evaluatedSidCount)
+
         foreach ($sid in @($SecurityIdentifier))
         {
             if ([System.String]::IsNullOrWhiteSpace($sid))
@@ -131,10 +141,10 @@ function Test-PSADTier0Privilege
         }
 
         [PSCustomObject]@{
-            IsTier0             = $isTier0
-            MatchedRole         = $matchedRole
-            MatchedSid          = $matchedSid
-            EvaluatedSidCount   = @($SecurityIdentifier).Where({ -not [System.String]::IsNullOrWhiteSpace($_) }).Count
+            IsTier0           = $isTier0
+            MatchedRole       = $matchedRole
+            MatchedSid        = $matchedSid
+            EvaluatedSidCount = $evaluatedSidCount
         }
     }
 }

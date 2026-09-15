@@ -17,6 +17,17 @@ function Resolve-PSADDsrmFailureDetail
         UnauthorizedAccessException carries the real LDAP status, and the outer message alone
         would tell an operator nothing they can act on.
 
+        Classification is performed on the full type NAME rather than by loading the type.
+        This is deliberate and is the reason the directory specific exceptions are handled
+        here rather than in a typed catch clause at the call site. PowerShell resolves a
+        catch clause type when that clause is evaluated, and an unresolvable type raises
+        'Unable to find type', which replaces the genuine exception and destroys the
+        diagnosis. Neither Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException
+        (this module has no dependency on the ActiveDirectory RSAT module) nor
+        System.DirectoryServices.Protocols.LdapException is guaranteed to be loaded on an
+        arbitrary management host, so matching them as strings is the only way to classify
+        them without any risk of masking the real fault.
+
         The function never inspects, receives or emits password material.
 
     .PARAMETER ErrorRecord
@@ -84,6 +95,26 @@ function Resolve-PSADDsrmFailureDetail
                 Category    = 'InvalidInput'
                 Remediation = 'Correct the supplied identity or password so that it satisfies the documented Tier 0 constraints, then retry.'
             }
+            'System.Net.Sockets.SocketException'                 = @{
+                Category    = 'Connectivity'
+                Remediation = 'The TCP handshake to the domain controller failed. Confirm name resolution, that the host is online, and that LDAP port 389 and the RPC endpoint mapper are permitted from the management host by the Tier 0 network policy.'
+            }
+            'System.DirectoryServices.Protocols.LdapException'   = @{
+                Category    = 'LdapConnectivity'
+                Remediation = 'The LDAP conversation with the domain controller failed. Verify the bind with ldp.exe, confirm the DC health with dcdiag, and check that LDAP signing and channel binding requirements are satisfied by the management host.'
+            }
+            'System.DirectoryServices.Protocols.LdapConnectionException' = @{
+                Category    = 'LdapConnectivity'
+                Remediation = 'The LDAP connection to the domain controller could not be established. Verify the bind with ldp.exe and confirm the DC health with dcdiag.'
+            }
+            'Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException' = @{
+                Category    = 'TargetNotFound'
+                Remediation = 'Verify the identity against Get-PSADDomainController. A DSRM reset must never be aimed at a member server or a decommissioned host.'
+            }
+            'Microsoft.ActiveDirectory.Management.ADServerDownException' = @{
+                Category    = 'Connectivity'
+                Remediation = 'The directory server did not answer. Confirm the domain controller is online and reachable, then re-run the reset.'
+            }
         }
 
         $defaultRemediation = @{
@@ -120,6 +151,14 @@ function Resolve-PSADDsrmFailureDetail
                 break
             }
         }
+
+        <#
+            The flattened detail is deliberately absent from the narration. It originates in
+            an exception message that this function does not control, so echoing it to the
+            verbose stream would widen the set of places an unexpected payload could surface.
+            Only the classification itself is narrated.
+        #>
+        Write-Verbose -Message ('Failure classified as {0} from an exception chain of {1} type(s), outermost {2}.' -f $selected.Category, $typeChain.Count, $typeChain[0])
 
         [PSCustomObject]@{
             Detail        = $detail

@@ -97,5 +97,100 @@ InModuleScope 'PSADEngine' {
                 $result.Category | Should -Be 'Timeout'
             }
         }
+
+        Context 'Directory exception types classified by name at runtime' {
+            BeforeAll {
+                <#
+                    These types are not loadable on every host and this module deliberately
+                    takes no dependency on the ActiveDirectory RSAT module, which is exactly
+                    why the resolver matches on the full type NAME instead of declaring a
+                    typed catch clause. A stub carrying the identical full name is compiled
+                    when the genuine type is absent so the contract is testable everywhere.
+                #>
+                function script:Confirm-TestExceptionType
+                {
+                    param ([string]$FullName, [string]$Namespace, [string]$ClassName)
+
+                    if ($FullName -as [type])
+                    {
+                        return
+                    }
+
+                    Add-Type -ErrorAction Stop -TypeDefinition @"
+namespace $Namespace
+{
+    public class $ClassName : System.Exception
+    {
+        public $ClassName(string message) : base(message) { }
+    }
+}
+"@
+                }
+
+                script:Confirm-TestExceptionType -FullName 'Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException' -Namespace 'Microsoft.ActiveDirectory.Management' -ClassName 'ADIdentityNotFoundException'
+                script:Confirm-TestExceptionType -FullName 'Microsoft.ActiveDirectory.Management.ADServerDownException' -Namespace 'Microsoft.ActiveDirectory.Management' -ClassName 'ADServerDownException'
+                script:Confirm-TestExceptionType -FullName 'System.DirectoryServices.Protocols.LdapException' -Namespace 'System.DirectoryServices.Protocols' -ClassName 'LdapException'
+            }
+
+            It 'Should classify <TypeName> as <Category>' -ForEach @(
+                @{ TypeName = 'System.Net.Sockets.SocketException'; Category = 'Connectivity' }
+                @{ TypeName = 'System.DirectoryServices.Protocols.LdapException'; Category = 'LdapConnectivity' }
+                @{ TypeName = 'Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException'; Category = 'TargetNotFound' }
+                @{ TypeName = 'Microsoft.ActiveDirectory.Management.ADServerDownException'; Category = 'Connectivity' }
+            ) {
+                $exception = if ('System.Net.Sockets.SocketException' -eq $TypeName)
+                {
+                    [System.Net.Sockets.SocketException]::new(10060)
+                }
+                else
+                {
+                    New-Object -TypeName $TypeName -ArgumentList 'test message'
+                }
+
+                $result = Resolve-PSADDsrmFailureDetail -ErrorRecord (script:New-TestErrorRecord -Exception $exception)
+
+                $result.Category | Should -Be $Category
+                $result.Remediation | Should -Not -BeNullOrEmpty
+            }
+
+            It 'Should classify a directory exception buried in an inner chain' {
+                $inner = New-Object -TypeName 'System.DirectoryServices.Protocols.LdapException' -ArgumentList 'bind rejected'
+                $outer = [System.FormatException]::new('wrapper', $inner)
+
+                $result = Resolve-PSADDsrmFailureDetail -ErrorRecord (script:New-TestErrorRecord -Exception $outer)
+
+                $result.Category | Should -Be 'LdapConnectivity'
+            }
+        }
+
+        Context 'Operator feedback' {
+            It 'Should narrate the classification and the chain depth' {
+                $inner = [System.TimeoutException]::new('timed out')
+                $outer = [System.FormatException]::new('wrapper', $inner)
+
+                $verbose = Resolve-PSADDsrmFailureDetail -ErrorRecord (script:New-TestErrorRecord -Exception $outer) -Verbose 4>&1 |
+                    Out-String
+
+                $verbose | Should -Match 'Failure classified as Timeout'
+                $verbose | Should -Match '2 type'
+                $verbose | Should -Match 'System.FormatException'
+            }
+
+            It 'Should not echo the flattened exception detail into the narration' {
+                <#
+                    The detail originates in an exception message this function does not
+                    control, so it is returned for deliberate logging rather than pushed onto
+                    the verbose stream automatically.
+                #>
+                $exception = [System.InvalidOperationException]::new('UNEXPECTED-PAYLOAD-MARKER')
+
+                $verbose = Resolve-PSADDsrmFailureDetail -ErrorRecord (script:New-TestErrorRecord -Exception $exception) -Verbose 4>&1 |
+                    Select-Object -Skip 0 |
+                    Where-Object { $_ -is [System.Management.Automation.VerboseRecord] } |
+                    Out-String
+
+                $verbose | Should -Not -Match 'UNEXPECTED-PAYLOAD-MARKER'
+            }
+        }
     }
 }

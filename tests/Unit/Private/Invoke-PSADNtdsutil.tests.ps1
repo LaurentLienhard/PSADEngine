@@ -176,5 +176,115 @@ InModuleScope 'PSADEngine' {
                 $readOffset[-1] | Should -BeLessThan $writeOffset[0]
             }
         }
+
+        Context 'Operator feedback' {
+            BeforeAll {
+                <#
+                    The narration is asserted against the abstract syntax tree so the checks
+                    hold on every platform, including build agents where ntdsutil.exe cannot
+                    be launched at all.
+                #>
+                $script:feedbackAst = (Get-Command -Name 'Invoke-PSADNtdsutil').ScriptBlock.Ast
+
+                $script:narrationCall = @(
+                    $script:feedbackAst.FindAll(
+                        {
+                            $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                            $args[0].GetCommandName() -in @('Write-Verbose', 'Write-Debug', 'Write-Warning', 'Write-Information')
+                        }, $true)
+                )
+            }
+
+            It 'Should narrate at least the path resolution, the process start and the exit' {
+                $script:narrationCall.Count | Should -BeGreaterOrEqual 4
+            }
+
+            It 'Should narrate the <Topic> step' -ForEach @(
+                @{ Topic = 'executable path resolution'; Pattern = 'Resolved the ntdsutil.exe executable path' }
+                @{ Topic = 'asynchronous pipe drain'; Pattern = 'Draining both output pipes asynchronously' }
+                @{ Topic = 'secret streaming'; Pattern = 'Streaming the DSRM secret' }
+                @{ Topic = 'output parsing'; Pattern = 'exited with code' }
+            ) {
+                $narrationText = ($script:narrationCall | ForEach-Object -Process { $_.Extent.Text }) -join ' '
+
+                $narrationText | Should -Match $Pattern
+            }
+
+            It 'Should never reference the secret parameter from any narration call' {
+                <#
+                    The decisive check: no feedback call may take $Password, the unmanaged
+                    buffer or a decrypted code unit as an argument.
+                #>
+                foreach ($call in $script:narrationCall)
+                {
+                    $variableUsed = @(
+                        $call.FindAll(
+                            { $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true) |
+                            ForEach-Object -Process { $_.VariablePath.UserPath }
+                    )
+
+                    $variableUsed | Should -Not -Contain 'Password'
+                    $variableUsed | Should -Not -Contain 'unmanagedBuffer'
+                    $variableUsed | Should -Not -Contain 'codeUnit'
+                }
+            }
+
+            It 'Should narrate the acting account name but never its secret' {
+                <#
+                    Naming the alternate account is required for a Tier 0 audit trail, so
+                    $Credential.UserName is legitimate. Reaching the password behind that
+                    credential, directly or through GetNetworkCredential, is not.
+                #>
+                foreach ($call in $script:narrationCall)
+                {
+                    $callText = $call.Extent.Text
+
+                    $callText | Should -Not -Match 'Credential\.Password'
+                    $callText | Should -Not -Match 'GetNetworkCredential'
+                }
+            }
+
+            It 'Should never narrate the captured transcript content' {
+                <#
+                    ntdsutil echoes its prompts, and on some builds the prompt line and the
+                    typed response share a buffer, so the transcript is measured and returned
+                    but never written to a feedback stream.
+                #>
+                foreach ($call in $script:narrationCall)
+                {
+                    $memberAccessed = @(
+                        $call.FindAll(
+                            { $args[0] -is [System.Management.Automation.Language.MemberExpressionAst] }, $true) |
+                            ForEach-Object -Process { $_.Extent.Text }
+                    )
+
+                    <#
+                        Measuring the transcript is permitted, echoing it is not. Any member
+                        access reaching one of the captured streams must terminate in Length.
+                    #>
+                    $streamAccess = @(
+                        $memberAccessed |
+                            Where-Object -FilterScript { $_ -match 'standardOutput|standardError|Transcript' }
+                    )
+
+                    foreach ($expression in $streamAccess)
+                    {
+                        $expression | Should -Match '\.Length$'
+                    }
+                }
+            }
+
+            It 'Should narrate the resolved path before failing on a missing executable' -Skip:(-not $script:isWindowsPlatform) {
+                $missingParam = @{
+                    ServerName = 'DC01'
+                    Password   = (script:New-TestSecureString -PlainText 'Str0ng-Enough-Pass!')
+                    Path       = 'C:\Windows\System32\ntdsutil-does-not-exist.exe'
+                }
+
+                $verbose = { Invoke-PSADNtdsutil @missingParam -Verbose 4>&1 } | Should -Throw -PassThru
+
+                $verbose | Should -Not -BeNullOrEmpty
+            }
+        }
     }
 }

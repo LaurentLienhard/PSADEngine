@@ -55,6 +55,13 @@ function Set-PSADDsrmPassword
         remaining ones with a stale credential. A non terminating error is also emitted for
         each failure so that existing error handling and transcript logging still observe it.
 
+        OPERATOR FEEDBACK. Every gate narrates its progress on the verbose stream and the
+        batch reports on the progress stream, so that a long Tier 0 rotation is observable
+        while it runs rather than only in the returned report. Result objects are streamed
+        one per domain controller as each completes and are never buffered, so a downstream
+        pipeline stage sees each outcome in real time. See the AnalysisLevel parameter to
+        control how much narration is produced.
+
     .PARAMETER Identity
         The domain controller to target. Accepts a distinguished name such as
         'CN=DC01,OU=Domain Controllers,DC=corp,DC=contoso,DC=com', an NTDS Settings
@@ -81,6 +88,25 @@ function Set-PSADDsrmPassword
         Intended for scheduled rotation running under a non interactive Tier 0 service
         identity. An explicit Confirm always wins over Force. Force never bypasses the
         password policy gate, the Tier 0 privilege gate or the auditing.
+
+    .PARAMETER AnalysisLevel
+        Controls how much operator feedback the function produces. Defaults to Thorough.
+
+          Thorough - The default and the historical behaviour. Every gate narrates on the
+                     verbose stream when the caller asks for verbose output, and the batch
+                     reports on the progress stream.
+
+          Quick    - Suppresses the informational narration and the progress bar for this
+                     invocation, including narration produced by the internal helpers, so
+                     that only errors and warnings reach the host. Intended for scheduled
+                     rotation where a transcript would otherwise be dominated by narration.
+
+        SECURITY: AnalysisLevel governs operator feedback only. It never suppresses the
+        Windows event log audit trail, never suppresses a non terminating error, and never
+        relaxes the password policy gate, the Tier 0 privilege gate, the existence check,
+        the reachability check or the confirmation prompt. Quick deliberately overrides an
+        explicit Verbose supplied on the same invocation, because 'only errors' is the whole
+        contract of that value.
 
     .EXAMPLE
         $secret = Read-Host -Prompt 'New DSRM password' -AsSecureString
@@ -116,6 +142,17 @@ function Set-PSADDsrmPassword
 
         Rotates a batch and then isolates the domain controllers that still hold the previous
         DSRM password. The Tier 0 privilege evaluation runs once for the whole batch.
+
+    .EXAMPLE
+        $dsrmParam = @{
+            NewPassword   = Get-Secret -Name 'DSRM-Rotation' -Vault 'Tier0Vault'
+            Force         = $true
+            AnalysisLevel = 'Quick'
+        }
+        Get-PSADDomainController | Set-PSADDsrmPassword @dsrmParam
+
+        Runs an unattended rotation that reports only failures, which keeps a scheduled task
+        transcript small while leaving the Windows event log audit trail untouched.
 
     .OUTPUTS
         System.Management.Automation.PSCustomObject
@@ -159,7 +196,12 @@ function Set-PSADDsrmPassword
 
         [Parameter()]
         [System.Management.Automation.SwitchParameter]
-        $Force
+        $Force,
+
+        [Parameter()]
+        [ValidateSet('Quick', 'Thorough')]
+        [System.String]
+        $AnalysisLevel = 'Thorough'
     )
 
     begin
@@ -182,6 +224,19 @@ function Set-PSADDsrmPassword
 
         $ErrorActionPreference = 'Stop'
 
+        <#
+            Quick lowers the verbose and progress preferences for this function scope only.
+            Because begin, process and end share one scope and child scopes inherit
+            preference variables, this single assignment also silences the narration emitted
+            by the private helpers without threading a Verbose argument through every splat.
+            The audit trail, the warning stream and the error stream are untouched.
+        #>
+        if ('Quick' -eq $AnalysisLevel)
+        {
+            $VerbosePreference = [System.Management.Automation.ActionPreference]::SilentlyContinue
+            $ProgressPreference = [System.Management.Automation.ActionPreference]::SilentlyContinue
+        }
+
         # Correlation identifiers for SIEM rules. Keep these stable across releases.
         $auditEventId = @{
             Attempt = 9000
@@ -195,7 +250,28 @@ function Set-PSADDsrmPassword
         $ldapPort = 389
         $connectivityTimeoutMillisecond = 2000
 
-        $results = [System.Collections.Generic.List[PSObject]]::new()
+        $progressActivity = 'Resetting DSRM passwords'
+        $progressId = 1
+
+        <#
+            Result objects are streamed, never buffered, so that a downstream pipeline stage
+            can act on each domain controller as it completes and so that a forest wide batch
+            does not grow an unbounded list in memory. Only the three counters survive the
+            batch, purely to produce the closing summary.
+        #>
+        $processedCount = 0
+        $successCount = 0
+        $failedCount = 0
+        $skippedCount = 0
+
+        <#
+            The batch size is only knowable when the function was not placed in a pipeline.
+            With pipeline input the total is genuinely unknown until the input is exhausted,
+            so an indeterminate progress bar and a running count are reported rather than a
+            fabricated percentage.
+        #>
+        $expectedTotal = if ($MyInvocation.ExpectingInput) { 0 } else { 1 }
+
         $useCredential = $PSBoundParameters.ContainsKey('Credential')
 
         $performedBy = if ($useCredential) { $Credential.UserName } else { [System.Environment]::UserName }
@@ -207,6 +283,8 @@ function Set-PSADDsrmPassword
         }
 
         # --- Gate 1: password policy, evaluated once for the whole batch. ---
+        Write-Verbose -Message ('Validating password complexity against the Tier 0 policy (minimum {0} characters, minimum {1} character categories, no control characters).' -f $minimumPasswordLength, $minimumPasswordCategory)
+
         $complexityParam = @{
             Password        = $NewPassword
             MinimumLength   = $minimumPasswordLength
@@ -225,6 +303,8 @@ function Set-PSADDsrmPassword
         Write-Verbose -Message ('The candidate DSRM password satisfies the Tier 0 policy ({0} characters, {1} character categories).' -f $complexity.Length, $complexity.CategoryCount)
 
         # --- Gate 2: Tier 0 privilege, evaluated once and cached for the whole batch. ---
+        Write-Verbose -Message ("Checking Tier 0 privileges for '{0}' using the {1}." -f $performedBy, $(if ($useCredential) { 'transitive tokenGroups of the supplied credential' } else { 'access token of the current process' }))
+
         $tokenParam = @{}
 
         if ($useCredential)
@@ -251,6 +331,8 @@ function Set-PSADDsrmPassword
 
         if (-not $privilege.IsTier0)
         {
+            Write-Verbose -Message 'Writing audit event for the refused Tier 0 operation.'
+
             $deniedParam = @{
                 Message   = ('DSRM password reset DENIED. Principal: {0}. Reason: the principal holds none of Domain Admins, Enterprise Admins or Schema Admins. Evaluated {1} security identifiers.' -f $performedBy, $privilege.EvaluatedSidCount)
                 EntryType = 'Error'
@@ -274,10 +356,34 @@ function Set-PSADDsrmPassword
         $notes = [System.Collections.Generic.List[System.String]]::new()
         $failureRecord = $null
         $failureCategory = $null
+        $contextMessage = $null
+
+        $processedCount++
+
+        $progressParam = @{
+            Activity = $progressActivity
+            Status   = ('Processing {0}' -f $Identity)
+            Id       = $progressId
+        }
+
+        if ($expectedTotal -gt 0)
+        {
+            $progressParam['PercentComplete'] = [System.Math]::Min(100, [System.Int32](($processedCount / $expectedTotal) * 100))
+        }
+        else
+        {
+            # -1 renders an indeterminate bar, which is honest when the batch size is unknown.
+            $progressParam['PercentComplete'] = -1
+            $progressParam['CurrentOperation'] = ('Domain controller {0} of the pipeline batch.' -f $processedCount)
+        }
+
+        Write-Progress @progressParam
 
         try
         {
             # --- Resolve and sanitise the target name before it reaches ntdsutil. ---
+            Write-Verbose -Message ("Verifying domain controller existence for '{0}'." -f $Identity)
+
             $serverName = ConvertTo-PSADDomainControllerName -Identity $Identity
 
             # --- Gate 3: the target must be a known domain controller. ---
@@ -315,7 +421,11 @@ function Set-PSADDsrmPassword
             $serverName = $matchedController[0].Name
             $notes.Add(('Resolved to the domain controller {0}.' -f $serverName))
 
+            Write-Verbose -Message ("Domain controller existence confirmed. '{0}' resolved to the canonical name '{1}'." -f $Identity, $serverName)
+
             # --- Gate 4: reachability. ---
+            Write-Verbose -Message ('Testing LDAP connectivity on {0} (port {1}, {2} ms budget).' -f $serverName, $ldapPort, $connectivityTimeoutMillisecond)
+
             $connectivityParam = @{
                 ComputerName        = $serverName
                 Port                = $ldapPort
@@ -328,6 +438,8 @@ function Set-PSADDsrmPassword
                     ("The domain controller '{0}' did not answer on LDAP port {1} within {2} ms. The DSRM password was not changed." -f $serverName, $ldapPort, $connectivityTimeoutMillisecond))
             }
 
+            Write-Verbose -Message ("LDAP connectivity confirmed on '{0}'." -f $serverName)
+
             # --- Gate 5: confirmation. ---
             $shouldProcessAction = 'Reset the Directory Services Restore Mode administrator password'
             $shouldProcessTarget = "Domain Controller '$serverName'"
@@ -336,10 +448,14 @@ function Set-PSADDsrmPassword
             {
                 $status = 'Skipped'
                 $notes.Add('The reset was not performed because WhatIf was supplied or the confirmation prompt was declined.')
+
+                Write-Verbose -Message ("The reset of '{0}' was skipped. WhatIf was supplied or the confirmation prompt was declined." -f $serverName)
             }
             else
             {
                 # --- Gate 6: audit the attempt before the change, not after. ---
+                Write-Verbose -Message ("Writing audit event {0} (ATTEMPT) for '{1}' before the change is delivered." -f $auditEventId.Attempt, $serverName)
+
                 $attemptParam = @{
                     Message   = ('DSRM password reset ATTEMPT. Target: {0}. Principal: {1}. Role: {2}. Started (UTC): {3:o}.' -f $serverName, $performedBy, $privilege.MatchedRole, $timestamp)
                     EntryType = 'Warning'
@@ -358,7 +474,7 @@ function Set-PSADDsrmPassword
                     $ntdsutilParam['Credential'] = $Credential
                 }
 
-                Write-Verbose -Message ("Invoking ntdsutil.exe against '{0}'." -f $serverName)
+                Write-Verbose -Message ("Resetting DSRM password via ntdsutil.exe on '{0}'." -f $serverName)
 
                 $rawResult = Invoke-PSADNtdsutil @ntdsutilParam
 
@@ -377,36 +493,80 @@ function Set-PSADDsrmPassword
 
                 $status = 'Success'
                 $notes.Add('The DSRM administrator password was reset successfully. Record the new value in the privileged secret store.')
+
+                Write-Verbose -Message ("The DSRM administrator password was reset successfully on '{0}'." -f $serverName)
             }
+        }
+        <#
+            Each catch clause records the error record and a context specific message, then
+            defers the shared reporting to the finally block. That keeps one failure handling
+            body while still giving every exception category its own operator facing
+            sentence, and it guarantees the per domain controller result object is emitted no
+            matter which clause fired.
+
+            DESIGN NOTE - why some categories are matched at runtime instead of by a typed
+            catch clause. PowerShell resolves a catch clause type only when the clause is
+            actually evaluated, and an unresolvable type raises
+            'InvalidOperation: Unable to find type' which REPLACES the real exception and
+            destroys the diagnosis. This module intentionally has no dependency on the
+            ActiveDirectory RSAT module (Get-PSADDomainController uses
+            System.DirectoryServices.ActiveDirectory and RequiredModules is empty), so
+            Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException is never
+            guaranteed to be loadable here; the same applies to
+            System.DirectoryServices.Protocols.LdapException on a host where that assembly
+            has not been loaded. Both are therefore classified by full type name at runtime
+            inside Resolve-PSADDsrmFailureDetail, which walks the whole inner exception chain
+            and yields the identical LdapConnectivity and TargetNotFound categories without
+            any risk of masking the real fault. Only types guaranteed to be resolvable are
+            declared as typed catch clauses below.
+        #>
+        catch [System.Management.Automation.ItemNotFoundException]
+        {
+            $failureRecord = $_
+            $contextMessage = ("Domain controller lookup failed: '{0}' was not found in the domain controller inventory of the target domain." -f $serverName)
+        }
+        catch [System.UnauthorizedAccessException]
+        {
+            $failureRecord = $_
+            $contextMessage = ("Permission denied while resetting the DSRM password on '{0}'. The acting principal was accepted by the Tier 0 gate but was refused by the target." -f $serverName)
+        }
+        catch [System.Net.Sockets.SocketException]
+        {
+            $failureRecord = $_
+            $contextMessage = ("TCP connectivity to '{0}' failed at the socket layer. The DSRM password was not changed." -f $serverName)
+        }
+        catch [System.TimeoutException]
+        {
+            $failureRecord = $_
+            $contextMessage = ("The operation against '{0}' exceeded its time budget. The DSRM password state on that domain controller is INDETERMINATE and must be verified." -f $serverName)
         }
         catch [System.Exception]
         {
-            <#
-                A single catch delegating to Resolve-PSADDsrmFailureDetail replaces a stack of
-                typed catch blocks. The helper owns the exception type to remediation mapping
-                and unwraps the whole inner exception chain, so granularity is preserved
-                without duplicating this handling body once per exception type.
-            #>
-            $status = 'Failed'
             $failureRecord = $_
-
-            $diagnosis = Resolve-PSADDsrmFailureDetail -ErrorRecord $_
-            $failureCategory = $diagnosis.Category
-
-            $notes.Add($diagnosis.Detail)
-            $notes.Add($diagnosis.Remediation)
-
-            $writeErrorParam = @{
-                Message     = ("The DSRM password reset failed for '{0}' [{1}]: {2} Remediation: {3}" -f $serverName, $diagnosis.Category, $diagnosis.Detail, $diagnosis.Remediation)
-                ErrorAction = $callerErrorAction
-            }
-
-            Write-Error @writeErrorParam
+            $contextMessage = $null
         }
         finally
         {
+            if ($null -ne $failureRecord)
+            {
+                $status = 'Failed'
+
+                $diagnosis = Resolve-PSADDsrmFailureDetail -ErrorRecord $failureRecord
+                $failureCategory = $diagnosis.Category
+
+                if (-not [System.String]::IsNullOrWhiteSpace($contextMessage))
+                {
+                    $notes.Add($contextMessage)
+                }
+
+                $notes.Add($diagnosis.Detail)
+                $notes.Add($diagnosis.Remediation)
+            }
+
             if ('Skipped' -ne $status)
             {
+                Write-Verbose -Message ('Writing audit event {0} ({1}) for {2}.' -f $(if ('Success' -eq $status) { $auditEventId.Success } else { $auditEventId.Failure }), $status.ToUpperInvariant(), $serverName)
+
                 $outcomeParam = @{
                     Message   = ('DSRM password reset {0}. Target: {1}. Principal: {2}. Completed (UTC): {3:o}. Detail: {4}' -f $status.ToUpperInvariant(), $serverName, $performedBy, [System.DateTime]::UtcNow, ($notes -join ' '))
                     EntryType = $(if ('Success' -eq $status) { 'Information' } else { 'Error' })
@@ -416,7 +576,15 @@ function Set-PSADDsrmPassword
                 $null = Write-PSADAuditEvent @outcomeParam
             }
 
-            $result = [PSCustomObject]@{
+            switch ($status)
+            {
+                'Success' { $successCount++ }
+                'Skipped' { $skippedCount++ }
+                default { $failedCount++ }
+            }
+
+            # Stream per domain controller so a long Tier 0 batch reports as it progresses.
+            [PSCustomObject]@{
                 ComputerName    = $serverName
                 Status          = $status
                 Timestamp       = $timestamp
@@ -427,19 +595,29 @@ function Set-PSADDsrmPassword
                 ErrorRecord     = $failureRecord
             }
 
-            $results.Add($result)
+            <#
+                The non terminating error is raised last so that the result object above has
+                already been emitted. An -ErrorAction Stop supplied by the caller therefore
+                still terminates the batch, but the operator can see exactly which domain
+                controller halted it. Nothing is in flight at this point because the failure
+                was already caught, so raising here cannot mask an earlier exception.
+            #>
+            if ($null -ne $failureRecord)
+            {
+                $writeErrorParam = @{
+                    Message     = ("The DSRM password reset failed for '{0}' [{1}]: {2} Remediation: {3}" -f $serverName, $diagnosis.Category, $diagnosis.Detail, $diagnosis.Remediation)
+                    ErrorAction = $callerErrorAction
+                }
 
-            # Stream per domain controller so a long Tier 0 batch reports as it progresses.
-            $result
+                Write-Error @writeErrorParam
+            }
         }
     }
 
     end
     {
-        $successCount = @($results).Where({ 'Success' -eq $_.Status }).Count
-        $failedCount = @($results).Where({ 'Failed' -eq $_.Status }).Count
-        $skippedCount = @($results).Where({ 'Skipped' -eq $_.Status }).Count
+        Write-Progress -Activity $progressActivity -Id $progressId -Completed
 
-        Write-Verbose -Message ('DSRM rotation batch complete. Success: {0}. Failed: {1}. Skipped: {2}.' -f $successCount, $failedCount, $skippedCount)
+        Write-Verbose -Message ('DSRM rotation batch complete. Processed: {0}. Success: {1}. Failed: {2}. Skipped: {3}.' -f $processedCount, $successCount, $failedCount, $skippedCount)
     }
 }

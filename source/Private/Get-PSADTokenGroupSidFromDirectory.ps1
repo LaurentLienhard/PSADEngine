@@ -92,6 +92,13 @@ function Get-PSADTokenGroupSidFromDirectory
         {
             $rootPath = if ($useServer) { 'LDAP://{0}/RootDSE' -f $Server } else { 'LDAP://RootDSE' }
 
+            <#
+                The bind path and the acting user name are narrated. The credential password
+                is never touched by the narration; it exists only as the SecureString backed
+                NetworkCredential handed straight to the DirectoryEntry constructor.
+            #>
+            Write-Verbose -Message ("Binding to '{0}' as '{1}' to read the transitive tokenGroups attribute." -f $rootPath, $Credential.UserName)
+
             $rootEntry = [System.DirectoryServices.DirectoryEntry]::new(
                 $rootPath, $Credential.UserName, $networkCredential.Password)
 
@@ -124,6 +131,8 @@ function Get-PSADTokenGroupSidFromDirectory
             $searcher.SizeLimit = 1
             $null = $searcher.PropertiesToLoad.Add('distinguishedName')
 
+            Write-Verbose -Message ("Directory bind succeeded against the naming context '{0}'. Searching for the account by sAMAccountName and userPrincipalName." -f $defaultNamingContext)
+
             $searchResult = $searcher.FindOne()
 
             if ($null -eq $searchResult)
@@ -142,6 +151,8 @@ function Get-PSADTokenGroupSidFromDirectory
                 $securityIdentifier.Add(
                     [System.Security.Principal.SecurityIdentifier]::new([System.Byte[]]$rawSid, 0).Value)
             }
+
+            Write-Verbose -Message ("The domain controller computed {0} transitive security identifier(s) for '{1}'. The identifiers themselves are not narrated." -f $securityIdentifier.Count, $Credential.UserName)
 
             return $securityIdentifier.ToArray()
         }

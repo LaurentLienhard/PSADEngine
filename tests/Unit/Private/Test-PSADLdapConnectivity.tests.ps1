@@ -114,5 +114,75 @@ InModuleScope 'PSADEngine' {
                 { Test-PSADLdapConnectivity -ComputerName '' } | Should -Throw
             }
         }
+
+        Context 'Operator feedback' {
+            BeforeAll {
+                $script:feedbackListener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+                $script:feedbackListener.Start()
+                $script:feedbackPort = $script:feedbackListener.LocalEndpoint.Port
+            }
+
+            AfterAll {
+                if ($null -ne $script:feedbackListener)
+                {
+                    $script:feedbackListener.Stop()
+                }
+            }
+
+            It 'Should narrate the probe before it is attempted' {
+                $connectivityParam = @{
+                    ComputerName        = '127.0.0.1'
+                    Port                = $script:feedbackPort
+                    TimeoutMilliseconds = 5000
+                }
+
+                $verbose = Test-PSADLdapConnectivity @connectivityParam -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'Opening a TCP probe'
+                $verbose | Should -Match '5000 ms budget'
+            }
+
+            It 'Should report the elapsed connection time against the budget' {
+                $connectivityParam = @{
+                    ComputerName        = '127.0.0.1'
+                    Port                = $script:feedbackPort
+                    TimeoutMilliseconds = 5000
+                }
+
+                $verbose = Test-PSADLdapConnectivity @connectivityParam -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'returned True after \d+ ms of a 5000 ms budget'
+            }
+
+            It 'Should report the elapsed time on an unreachable target as well' {
+                $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+                $probe.Start()
+                $closedPort = $probe.LocalEndpoint.Port
+                $probe.Stop()
+
+                $connectivityParam = @{
+                    ComputerName        = '127.0.0.1'
+                    Port                = $closedPort
+                    TimeoutMilliseconds = 2000
+                }
+
+                $verbose = Test-PSADLdapConnectivity @connectivityParam -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'returned False after \d+ ms'
+            }
+
+            It 'Should still return only a boolean on the success stream' {
+                $connectivityParam = @{
+                    ComputerName        = '127.0.0.1'
+                    Port                = $script:feedbackPort
+                    TimeoutMilliseconds = 5000
+                }
+
+                $result = Test-PSADLdapConnectivity @connectivityParam -Verbose
+
+                $result | Should -BeOfType [bool]
+                $result | Should -BeTrue
+            }
+        }
     }
 }

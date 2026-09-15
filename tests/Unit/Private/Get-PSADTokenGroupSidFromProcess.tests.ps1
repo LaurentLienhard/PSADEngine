@@ -87,5 +87,22 @@ InModuleScope 'PSADEngine' {
                 $tryWithFinally[0].Finally.Extent.Text | Should -Match 'windowsIdentity\.Dispose'
             }
         }
+
+        Context 'Operator feedback' {
+            It 'Should narrate that the access token is being enumerated' -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6)) {
+                $verbose = Get-PSADTokenGroupSidFromProcess -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'Enumerating the access token of the current process'
+            }
+
+            It 'Should narrate the collected count without narrating any identifier' -Skip:(-not ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6)) {
+                $verbose = Get-PSADTokenGroupSidFromProcess -Verbose 4>&1 |
+                    Where-Object { $_ -is [System.Management.Automation.VerboseRecord] } |
+                    Out-String
+
+                $verbose | Should -Match 'Collected \d+ security identifier'
+                $verbose | Should -Not -Match 'S-1-5-21'
+            }
+        }
     }
 }

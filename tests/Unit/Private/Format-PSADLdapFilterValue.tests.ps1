@@ -67,5 +67,38 @@ InModuleScope 'PSADEngine' {
                 $result | Should -Be @('jdoe', '\2a')
             }
         }
+
+        Context 'Operator feedback' {
+            It 'Should narrate a pass through when no metacharacter is present' {
+                $verbose = Format-PSADLdapFilterValue -Value 'jdoe' -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'no RFC 4515 metacharacter'
+            }
+
+            It 'Should narrate that an injection candidate was escaped' {
+                $verbose = Format-PSADLdapFilterValue -Value 'svc_app01)(objectClass=*' -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'metacharacters and was escaped'
+            }
+
+            It 'Should narrate an empty assertion value' {
+                $verbose = Format-PSADLdapFilterValue -Value '' -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'was empty'
+            }
+
+            It 'Should never narrate the assertion value itself' {
+                <#
+                    Only the verbose records are inspected. A bare 4>&1 would also capture
+                    the escaped value on the success stream and assert against the function
+                    return value rather than against its narration.
+                #>
+                $verbose = Format-PSADLdapFilterValue -Value 'adm_jsmith)(objectClass=*' -Verbose 4>&1 |
+                    Where-Object { $_ -is [System.Management.Automation.VerboseRecord] } |
+                    Out-String
+
+                $verbose | Should -Not -Match 'adm_jsmith'
+            }
+        }
     }
 }

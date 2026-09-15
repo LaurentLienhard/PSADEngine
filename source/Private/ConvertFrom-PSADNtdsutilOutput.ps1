@@ -133,7 +133,13 @@ function ConvertFrom-PSADNtdsutilOutput
             }
         }
 
-        Write-Verbose -Message ('ntdsutil verdict: Succeeded={0}; ExitCode={1}.' -f $succeeded, $ExitCode)
+        <#
+            The parsed verdict is narrated, never the transcript. ntdsutil echoes its prompts
+            on standard output and the captured buffer is not guaranteed to exclude a typed
+            response on every build, so the raw text is returned for the caller to log
+            deliberately rather than pushed onto the verbose stream automatically.
+        #>
+        Write-Verbose -Message ('Parsed a {0} character ntdsutil transcript. Verdict: Succeeded={1}; ExitCode={2}; Classified={3}.' -f $transcript.Length, $succeeded, $ExitCode, $(if ($null -eq $failureReason) { 'success token matched' } else { 'failure signature matched' }))
 
         [PSCustomObject]@{
             Succeeded     = $succeeded

@@ -134,6 +134,37 @@ InModuleScope 'PSADEngine' {
             }
         }
 
+        Context 'Operator feedback' {
+            It 'Should narrate a passing verdict with the aggregate measurements' {
+                $verbose = Test-PSADDsrmPasswordComplexity -Password (script:New-TestSecureString -PlainText 'Str0ng-Enough-Pass!') -Verbose 4>&1 |
+                    Out-String
+
+                $verbose | Should -Match 'Password complexity validation PASSED'
+                $verbose | Should -Match '19 characters'
+            }
+
+            It 'Should narrate a failing verdict with the violated rule count' {
+                $verbose = Test-PSADDsrmPasswordComplexity -Password (script:New-TestSecureString -PlainText 'short1A') -Verbose 4>&1 |
+                    Out-String
+
+                $verbose | Should -Match 'Password complexity validation FAILED'
+                $verbose | Should -Match 'policy rule'
+            }
+
+            It 'Should never narrate the per category composition of the secret' {
+                <#
+                    The category booleans describe the shape of a live Tier 0 credential and
+                    would narrow a brute force search space if a transcript were captured.
+                #>
+                $verbose = Test-PSADDsrmPasswordComplexity -Password (script:New-TestSecureString -PlainText 'Str0ng-Enough-Pass!') -Verbose 4>&1 |
+                    Where-Object { $_ -is [System.Management.Automation.VerboseRecord] } |
+                    Out-String
+
+                $verbose | Should -Not -Match 'HasUpperCase'
+                $verbose | Should -Not -Match 'HasNonAlphanumeric'
+            }
+        }
+
         Context 'Secret hygiene' {
             It 'Should never place the secret in the returned object' {
                 $result = Test-PSADDsrmPasswordComplexity -Password (script:New-TestSecureString -PlainText 'Tr0ub4dor-Horse!')

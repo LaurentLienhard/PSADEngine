@@ -67,6 +67,16 @@ function Test-PSADLdapConnectivity
         $tcpClient = $null
         $isReachable = $false
 
+        <#
+            The handshake is timed so that the narration can report how close a domain
+            controller ran to its budget. A site link that answers in 1 900 ms of a 2 000 ms
+            budget is healthy today and an intermittent false negative tomorrow, and that is
+            only visible if the elapsed time is reported rather than just the verdict.
+        #>
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        Write-Verbose -Message ("Opening a TCP probe to '{0}' on port {1} with a {2} ms budget." -f $ComputerName, $Port, $TimeoutMilliseconds)
+
         try
         {
             $tcpClient = [System.Net.Sockets.TcpClient]::new()
@@ -97,11 +107,15 @@ function Test-PSADLdapConnectivity
         }
         finally
         {
+            $stopwatch.Stop()
+
             if ($null -ne $tcpClient)
             {
                 $tcpClient.Dispose()
             }
         }
+
+        Write-Verbose -Message ("TCP probe of '{0}' on port {1} returned {2} after {3} ms of a {4} ms budget." -f $ComputerName, $Port, $isReachable, $stopwatch.ElapsedMilliseconds, $TimeoutMilliseconds)
 
         $isReachable
     }

@@ -94,5 +94,48 @@ InModuleScope 'PSADEngine' {
                     }).Mandatory | Should -Contain $true
             }
         }
+
+        Context 'Operator feedback' {
+            It 'Should narrate the number of identifiers evaluated' {
+                $verbose = Test-PSADTier0Privilege -SecurityIdentifier @(
+                    'S-1-5-21-1111111111-2222222222-3333333333-1105'
+                    'S-1-5-21-1111111111-2222222222-3333333333-512'
+                ) -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'Evaluating 2 security identifier'
+            }
+
+            It 'Should narrate the matched role on a Tier 0 principal' {
+                $verbose = Test-PSADTier0Privilege -SecurityIdentifier @(
+                    'S-1-5-21-1111111111-2222222222-3333333333-512'
+                ) -Verbose 4>&1 | Out-String
+
+                $verbose | Should -Match 'Domain Admins'
+            }
+
+            It 'Should NEVER narrate a security identifier' {
+                <#
+                    A token group set enumerates the complete privilege topology of a Tier 0
+                    principal and is exactly the reconnaissance worth harvesting from a
+                    captured transcript.
+                #>
+                $verbose = Test-PSADTier0Privilege -SecurityIdentifier @(
+                    'S-1-5-21-1111111111-2222222222-3333333333-1105'
+                    'S-1-5-21-1111111111-2222222222-3333333333-512'
+                    'S-1-5-32-544'
+                ) -Verbose 4>&1 |
+                    Where-Object { $_ -is [System.Management.Automation.VerboseRecord] } |
+                    Out-String
+
+                $verbose | Should -Not -Match 'S-1-5-21'
+                $verbose | Should -Not -Match 'S-1-5-32-544'
+            }
+
+            It 'Should still report the evaluated count on the returned object' {
+                $result = Test-PSADTier0Privilege -SecurityIdentifier @('S-1-5-32-544', '', $null)
+
+                $result.EvaluatedSidCount | Should -Be 1
+            }
+        }
     }
 }

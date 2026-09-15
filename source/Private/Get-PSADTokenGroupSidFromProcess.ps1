@@ -45,6 +45,8 @@ function Get-PSADTokenGroupSidFromProcess
 
         $windowsIdentity = $null
 
+        Write-Verbose -Message 'Enumerating the access token of the current process for its user and group security identifiers.'
+
         try
         {
             $windowsIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -60,6 +62,13 @@ function Get-PSADTokenGroupSidFromProcess
             {
                 $securityIdentifier.Add($group.Value)
             }
+
+            <#
+                Counts and the authentication context are narrated; the identifiers are not.
+                A token group set maps the entire privilege topology of the principal and is
+                exactly the reconnaissance worth harvesting from a captured transcript.
+            #>
+            Write-Verbose -Message ("Collected {0} security identifier(s) from the access token of '{1}'. Authenticated: {2}. The identifiers themselves are not narrated." -f $securityIdentifier.Count, $windowsIdentity.Name, $windowsIdentity.IsAuthenticated)
 
             return $securityIdentifier.ToArray()
         }

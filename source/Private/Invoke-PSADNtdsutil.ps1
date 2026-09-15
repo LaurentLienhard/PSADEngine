@@ -130,6 +130,8 @@ function Invoke-PSADNtdsutil
             Join-Path -Path $env:SystemRoot -ChildPath 'System32\ntdsutil.exe'
         }
 
+        Write-Verbose -Message ("Resolved the ntdsutil.exe executable path to '{0}'." -f $executablePath)
+
         if (-not (Test-Path -Path $executablePath -PathType Leaf))
         {
             throw [System.IO.FileNotFoundException]::new(
@@ -185,6 +187,8 @@ function Invoke-PSADNtdsutil
                     'ntdsutil.exe could not be started. No new process was created.')
             }
 
+            Write-Verbose -Message ('ntdsutil.exe started as process {0}. Draining both output pipes asynchronously before any input is written.' -f $process.Id)
+
             # Start draining both pipes before writing, otherwise ntdsutil deadlocks.
             $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
             $standardErrorTask = $process.StandardError.ReadToEndAsync()
@@ -192,6 +196,14 @@ function Invoke-PSADNtdsutil
             $inputWriter = $process.StandardInput
             $inputWriter.WriteLine('set dsrm password')
             $inputWriter.WriteLine(('reset password on server {0}' -f $ServerName))
+
+            <#
+                Only the fact that the secret is being streamed is narrated. Neither the
+                password, nor its length, nor any code unit is written to a stream: the loop
+                bounds below are derived from Password.Length precisely so the secret never
+                has to be measured anywhere an operator can see it.
+            #>
+            Write-Verbose -Message ('Streaming the DSRM secret to the ntdsutil standard input for the prompt and its confirmation. The secret is never placed on the command line and never becomes a managed string.')
 
             $unmanagedBuffer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 
@@ -223,11 +235,23 @@ function Invoke-PSADNtdsutil
                     ("ntdsutil.exe did not exit within {0} seconds while targeting '{1}'. The process was terminated. The DSRM password state on the target is indeterminate and must be verified." -f $TimeoutSecond, $ServerName))
             }
 
+            $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+            $standardError = $standardErrorTask.GetAwaiter().GetResult()
+
+            <#
+                The transcript is measured but never echoed. ntdsutil prompts are captured
+                verbatim on standard output and, on some builds, the prompt line and the
+                typed response can share a buffer, so echoing the transcript to the verbose
+                stream would be a plausible secret disclosure path. Interpretation is left to
+                ConvertFrom-PSADNtdsutilOutput, which narrates the parsed verdict instead.
+            #>
+            Write-Verbose -Message ('ntdsutil.exe exited with code {0} after emitting {1} character(s) on standard output and {2} on standard error. The transcript is returned for parsing and is not narrated.' -f $process.ExitCode, $standardOutput.Length, $standardError.Length)
+
             [PSCustomObject]@{
                 ServerName     = $ServerName
                 ExitCode       = $process.ExitCode
-                StandardOutput = $standardOutputTask.GetAwaiter().GetResult()
-                StandardError  = $standardErrorTask.GetAwaiter().GetResult()
+                StandardOutput = $standardOutput
+                StandardError  = $standardError
             }
         }
         catch [System.ComponentModel.Win32Exception]

@@ -149,6 +149,22 @@ function Test-PSADDsrmPasswordComplexity
             $failureReason.Add('The password contains a control character. Control characters are rejected because they would corrupt the ntdsutil input script.')
         }
 
+        <#
+            The narration reports the verdict and the aggregate measurements only. The
+            per category booleans are deliberately not narrated: they describe the shape of
+            a live Tier 0 secret and would narrow a brute force search space if a transcript
+            were ever captured. No character, fragment or length-preserving echo of the
+            password reaches any stream.
+        #>
+        if (0 -eq $failureReason.Count)
+        {
+            Write-Verbose -Message ('Password complexity validation PASSED: {0} characters, {1} of 4 character categories, no control character.' -f $length, $categoryCount)
+        }
+        else
+        {
+            Write-Verbose -Message ('Password complexity validation FAILED against {0} policy rule(s). Read the FailureReason property for the detail.' -f $failureReason.Count)
+        }
+
         [PSCustomObject]@{
             IsValid            = ($failureReason.Count -eq 0)
             Length             = $length
