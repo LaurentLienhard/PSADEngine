@@ -82,6 +82,44 @@ BuildWorkflow:
 
     - publish_module_to_gallery
 
+    # Publishes the built module to the internal SMB PowerShell repository.
+    # Task is defined in ./.build/PublishEnterpriseRepository.build.ps1 (auto-loaded:
+    # build.ps1 dot-sources every *.ps1 under ./.build/ after the ModuleBuildTasks
+    # aliases below), with its helpers in ./.build/EnterpriseRepository.*.ps1.
+    # It wraps the private function Publish-EnterpriseBypassModule, which builds a
+    # PSModule-tagged .nupkg and drops it on the share root plus the versioned folder.
+    # Re-running the task is idempotent (same version overwritten in place).
+    #
+    # Runs LAST on purpose: GitHub and the PowerShell Gallery are the authoritative
+    # targets, so an unreachable corporate share must never invalidate them.
+    #
+    # Environment variables (see ./.enterprise-repo.env.example):
+    #   ENTERPRISE_REPO_SMB_SHARE    (required) UNC path, e.g. \\FS01\PowerShellRepo.
+    #                                When unset, the task logs and is skipped - the
+    #                                build does NOT fail.
+    #   ENTERPRISE_REPO_CREDENTIAL   (optional) SecretManagement secret name holding a
+    #                                PSCredential or a SecureString.
+    #   ENTERPRISE_REPO_VAULT        (optional) SecretManagement vault name.
+    #   ENTERPRISE_REPO_USERNAME     (optional) e.g. CORP\svc_psrepo. Used with
+    #                                ENTERPRISE_REPO_PASSWORD, injected from GitHub
+    #                                Secrets / Azure DevOps secret variables.
+    #   ENTERPRISE_REPO_PASSWORD     (optional) NEVER commit this value.
+    #   ENTERPRISE_REPO_MODULE_PATH  (optional) Overrides the automatic discovery of
+    #                                output/module/<ProjectName>/<Version>.
+    #   ENTERPRISE_REPO_WHATIF       (optional) 'true' for a dry run.
+    #
+    # Failure semantics: missing artefact or bad credentials fail the build loudly;
+    # an unreachable share only emits a warning (graceful degradation). Requires a
+    # Windows build agent (SMB mapping cmdlets); skipped with a warning elsewhere.
+    #
+    # Usage: ./build.ps1 -Tasks publish   (GitHub + Gallery + Enterprise)
+    - Publish_Module_To_EnterpriseRepository
+
+  # SMB-only publication, without touching GitHub or the PowerShell Gallery.
+  # The module must already be built, e.g. ./build.ps1 -Tasks build, publish-enterprise
+  publish-enterprise:
+    - Publish_Module_To_EnterpriseRepository
+
 ####################################################
 #       PESTER  Configuration                      #
 ####################################################
