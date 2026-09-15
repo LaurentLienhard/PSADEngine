@@ -69,6 +69,29 @@
         Specifies to use the compatibility module PowerShellGet. This parameter
         only works then the method of downloading dependencies is PSResourceGet.
         This can also be configured in Resolve-Dependency.psd1.
+
+    .PARAMETER Parameters
+        Free-form hashtable of settings handed over to the build tasks. It is the
+        supported way of passing values that must never transit through an environment
+        variable or the command line, typically a [PSCredential].
+
+        Consumed today by 'Publish_Module_To_EnterpriseRepository'
+        (./.build/PublishEnterpriseRepository.build.ps1). Keys that a task does not
+        recognise are ignored, so a single table can drive several tasks.
+
+        Precedence for every enterprise repository setting is:
+        -Parameters > Invoke-Build property / session variable > ENTERPRISE_REPO_*
+        environment variable > ./.enterprise-repo.env file > default.
+
+    .EXAMPLE
+        $publishParam = @{
+            EnterpriseSmbShare   = '\\FS01\PowerShellRepo'
+            EnterpriseCredential = (Get-Credential -UserName 'CORP\svc_psrepo' -Message 'Enterprise repository')
+        }
+        ./build.ps1 -Tasks build, publish-enterprise -Parameters $publishParam
+
+        Builds the module and publishes it to the internal SMB PowerShell repository with
+        an interactively supplied credential.
 #>
 [CmdletBinding()]
 param
@@ -146,7 +169,23 @@ param
 
     [Parameter()]
     [System.Management.Automation.SwitchParameter]
-    $UsePowerShellGetCompatibilityModule
+    $UsePowerShellGetCompatibilityModule,
+
+    <#
+        Invoke-Build exposes every parameter of this script as one of its own dynamic
+        parameters and then binds it back when the build file is dot-sourced, which makes
+        $Parameters visible to the task files loaded from ./.build/ through
+        'property Parameters @{}'. Declaring it here is therefore what makes
+        './build.ps1 -Parameters @{ ... }' possible at all: Invoke-Build itself has no
+        -Parameters parameter.
+
+        Typed as Hashtable so a caller mistake fails immediately at binding time. Values
+        are free-form, including [PSCredential] objects, which never leave the process.
+    #>
+    [Parameter()]
+    [AllowNull()]
+    [System.Collections.Hashtable]
+    $Parameters
 )
 
 <#

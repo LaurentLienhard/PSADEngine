@@ -26,11 +26,38 @@
         by the built module. The task dot-sources it straight from
         './source/Private/' so the publication never depends on the module being imported.
 
-        CONFIGURATION (environment variables)
-        ENTERPRISE_REPO_SMB_SHARE   Mandatory switch of the whole task. UNC path of the
-                                    repository share, e.g. '\\FS01\PowerShellRepo'. When
-                                    it is not defined the task logs and returns, so a
-                                    build without enterprise configuration never fails.
+        CONFIGURATION PRECEDENCE
+        Every setting is resolved independently, in this order:
+
+            1. './build.ps1 -Parameters @{ ... }'   (highest, preferred, interactive)
+            2. The matching Invoke-Build property or session variable
+               ($EnterpriseSmbShare, $EnterpriseCredential, ...)
+            3. The ENTERPRISE_REPO_* process environment variables (CI/CD)
+            4. The git-ignored './.enterprise-repo.env' file (workstation, non-secret only)
+            5. Built-in defaults
+
+        Because precedence is applied per setting, passing only the credential as a
+        parameter while keeping the share in the environment is valid and supported.
+
+        CONFIGURATION (build parameters - preferred)
+        EnterpriseSmbShare             UNC path of the repository share.
+        EnterpriseCredential           [PSCredential] used to write on the share. The
+                                       secret stays a SecureString inside the process and
+                                       never reaches the environment, the command line or
+                                       the shell history.
+        EnterpriseUserName             User name used with a SecureString vault secret or
+                                       with ENTERPRISE_REPO_PASSWORD.
+        EnterpriseCredentialSecretName SecretManagement secret name.
+        EnterpriseVaultName            SecretManagement vault name.
+        EnterpriseModulePath           Explicit built module folder.
+        EnterpriseDryRun               $true for a dry run.
+
+        CONFIGURATION (environment variables - CI/CD, still fully supported)
+        ENTERPRISE_REPO_SMB_SHARE   Mandatory switch of the whole task when no
+                                    EnterpriseSmbShare parameter is supplied. UNC path of
+                                    the repository share, e.g. '\\FS01\PowerShellRepo'.
+                                    When neither is defined the task logs and returns, so
+                                    a build without enterprise configuration never fails.
         ENTERPRISE_REPO_CREDENTIAL  Optional name of a SecretManagement secret holding a
                                     PSCredential (or a SecureString, combined with
                                     ENTERPRISE_REPO_USERNAME).
@@ -46,7 +73,8 @@
 
         A developer workstation can place the non-secret values in a git-ignored
         './.enterprise-repo.env' file; see './.enterprise-repo.env.example'. Process
-        environment variables always take precedence over that file.
+        environment variables always take precedence over that file, and build parameters
+        take precedence over both.
 
         FAILURE SEMANTICS
         Module folder missing          -> hard failure (the artefact must exist).
@@ -66,12 +94,26 @@
         ./build.ps1 -Tasks publish
 
         Publishes the GitHub release, the wiki content, the PowerShell Gallery package and
-        finally the enterprise SMB repository.
+        finally the enterprise SMB repository, using the ENTERPRISE_REPO_* environment
+        variables.
 
     .EXAMPLE
-        ./build.ps1 -Tasks build, publish-enterprise
+        $publishParam = @{
+            EnterpriseSmbShare   = '\\FS01\PowerShellRepo'
+            EnterpriseCredential = (Get-Credential -UserName 'CORP\svc_psrepo' -Message 'Enterprise repository')
+        }
+        ./build.ps1 -Tasks build, publish-enterprise -Parameters $publishParam
 
-        Builds the module and publishes it to the enterprise SMB repository only.
+        Builds the module and publishes it to the enterprise SMB repository using an
+        interactively supplied credential. Nothing secret is written to the environment.
+
+    .EXAMPLE
+        ./build.ps1 -Tasks build, publish-enterprise -Parameters @{
+            EnterpriseSmbShare = '\\FS01\PowerShellRepo'
+            EnterpriseDryRun   = $true
+        }
+
+        Dry run against an explicit share, using the build agent security context.
 
     .NOTES
         Tier 0 note: an internal PowerShell repository is a software supply chain asset.
@@ -112,16 +154,81 @@ param
     [System.String]
     $ModuleOutputPath = (property ModuleOutputPath ''),
 
+    <#
+        The parameter table supplied by './build.ps1 -Parameters @{ ... }'. Typed as Object
+        so that any IDictionary is accepted, and validated by
+        ConvertFrom-EnterpriseRepositoryParameterTable rather than by the binder, which
+        would otherwise fail during dot-sourcing with an opaque message.
+    #>
     [Parameter()]
+    [AllowNull()]
+    [System.Object]
+    $Parameters = (property Parameters @{}),
+
+    [Parameter()]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [System.String]
+    $EnterpriseSmbShare = (property EnterpriseSmbShare ''),
+
+    # Retained for backward compatibility; superseded by EnterpriseSmbShare.
+    [Parameter()]
+    [AllowNull()]
+    [AllowEmptyString()]
     [System.String]
     $EnterpriseRepositorySmbShare = (property EnterpriseRepositorySmbShare ''),
+
+    <#
+        Typed as Object so a caller mistake produces the explicit message raised by
+        ConvertFrom-EnterpriseRepositoryParameterTable instead of a binder failure at
+        dot-source time.
+
+        The default is an empty string, never $null: Get-BuildProperty (aliased 'property')
+        treats a $null default as 'this property is mandatory' and aborts the build with
+        "Missing property". An empty string is the documented 'not supplied' sentinel and
+        is dropped by the normaliser.
+    #>
+    [Parameter()]
+    [AllowNull()]
+    [System.Object]
+    $EnterpriseCredential = (property EnterpriseCredential ''),
+
+    [Parameter()]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [System.String]
+    $EnterpriseUserName = (property EnterpriseUserName ''),
+
+    [Parameter()]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [System.String]
+    $EnterpriseCredentialSecretName = (property EnterpriseCredentialSecretName ''),
+
+    [Parameter()]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [System.String]
+    $EnterpriseVaultName = (property EnterpriseVaultName ''),
+
+    [Parameter()]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [System.String]
+    $EnterpriseModulePath = (property EnterpriseModulePath ''),
+
+    # Empty string, not $null: see the EnterpriseCredential note above.
+    [Parameter()]
+    [AllowNull()]
+    [System.Object]
+    $EnterpriseDryRun = (property EnterpriseDryRun ''),
 
     [Parameter()]
     [System.String]
     $EnterpriseRepositoryConfigFile = (property EnterpriseRepositoryConfigFile '.enterprise-repo.env')
 )
 
-# Synopsis: Publishes the built module to the enterprise SMB PowerShell repository (skipped when ENTERPRISE_REPO_SMB_SHARE is not defined).
+# Synopsis: Publishes the built module to the enterprise SMB PowerShell repository (skipped when no SMB share is configured through -Parameters or ENTERPRISE_REPO_SMB_SHARE).
 task Publish_Module_To_EnterpriseRepository {
     $ErrorActionPreference = 'Stop'
 
@@ -166,21 +273,68 @@ task Publish_Module_To_EnterpriseRepository {
     # ------------------------------------------------------------------ #
     # 2. Resolve configuration and decide whether the task applies        #
     # ------------------------------------------------------------------ #
+    <#
+        Two explicit layers are merged before the environment is even consulted:
+
+          a. the individual task parameters, which Invoke-Build resolves from a build
+             property, a session variable or an equally named environment variable;
+          b. the './build.ps1 -Parameters @{ ... }' table, which is the most explicit
+             expression of intent and therefore wins over (a).
+
+        Both layers go through the same normaliser, which drops null and empty values so
+        that an unbound parameter can never shadow an ENTERPRISE_REPO_* variable.
+    #>
+    $shareParameterValue = $EnterpriseSmbShare
+
+    if ([string]::IsNullOrWhiteSpace($shareParameterValue))
+    {
+        $shareParameterValue = $EnterpriseRepositorySmbShare
+    }
+
+    $taskParameterTable = @{
+        SmbShare             = $shareParameterValue
+        Credential           = $EnterpriseCredential
+        UserName             = $EnterpriseUserName
+        CredentialSecretName = $EnterpriseCredentialSecretName
+        VaultName            = $EnterpriseVaultName
+        ModulePath           = $EnterpriseModulePath
+        DryRun               = $EnterpriseDryRun
+    }
+
+    $settingOverride = ConvertFrom-EnterpriseRepositoryParameterTable -InputObject $taskParameterTable
+
+    foreach ($entry in (ConvertFrom-EnterpriseRepositoryParameterTable -InputObject $Parameters).GetEnumerator())
+    {
+        $settingOverride[$entry.Key] = $entry.Value
+    }
+
     $configurationParam = @{
         LocalConfigurationPath = Join-Path -Path $BuildRoot -ChildPath $EnterpriseRepositoryConfigFile
-        SmbShare               = $EnterpriseRepositorySmbShare
+    }
+
+    foreach ($entry in $settingOverride.GetEnumerator())
+    {
+        $configurationParam[$entry.Key] = $entry.Value
+    }
+
+    if ($settingOverride.Count -gt 0)
+    {
+        Write-Build DarkGray "  Overridden by parameter: $(($settingOverride.Keys | Sort-Object) -join ', ')"
     }
 
     $configuration = Get-EnterpriseRepositoryConfiguration @configurationParam
 
     if (-not $configuration.IsEnabled)
     {
-        Write-Build Yellow "  $taskName skipped: ENTERPRISE_REPO_SMB_SHARE is not defined."
+        Write-Build Yellow "  $taskName skipped: no SMB share configured."
 
         $notConfiguredResultParam = @{
             Status     = 'Skipped'
             ModuleName = $ProjectName
-            Reason     = 'ENTERPRISE_REPO_SMB_SHARE is not defined.'
+            Reason     = (
+                'No SMB share configured. Pass -Parameters @{ EnterpriseSmbShare = ' +
+                "'\\FS01\PowerShellRepo' } or define ENTERPRISE_REPO_SMB_SHARE."
+            )
         }
 
         $script:EnterpriseRepositoryPublishResult = New-EnterpriseRepositoryPublishResult @notConfiguredResultParam
@@ -242,9 +396,13 @@ task Publish_Module_To_EnterpriseRepository {
 
     $builtModuleBase = Get-EnterpriseBuiltModuleBase @builtModuleBaseParam
 
+    <#
+        An explicitly supplied EnterpriseModulePath outranks the generic ModuleOutputPath
+        build property; otherwise the historical order is preserved.
+    #>
     $explicitModulePath = $ModuleOutputPath
 
-    if ([string]::IsNullOrWhiteSpace($explicitModulePath))
+    if ($settingOverride.ContainsKey('ModulePath') -or [string]::IsNullOrWhiteSpace($explicitModulePath))
     {
         $explicitModulePath = $configuration.ModulePath
     }
@@ -263,11 +421,13 @@ task Publish_Module_To_EnterpriseRepository {
     # ------------------------------------------------------------------ #
     # 4. Resolve credentials (hard failure when declared but broken)      #
     # ------------------------------------------------------------------ #
+    $credentialSource = Get-EnterpriseRepositoryCredentialSource -Configuration $configuration
+
     $credential = Resolve-EnterpriseRepositoryCredential -Configuration $configuration
 
     if ($null -ne $credential)
     {
-        Write-Build DarkGray "  Authenticating as     : $($credential.UserName)"
+        Write-Build DarkGray "  Authenticating as     : $($credential.UserName) [$credentialSource]"
     }
     else
     {
@@ -333,7 +493,7 @@ task Publish_Module_To_EnterpriseRepository {
 
     if ($configuration.WhatIf)
     {
-        Write-Build Yellow '  ENTERPRISE_REPO_WHATIF is set: performing a dry run.'
+        Write-Build Yellow '  Dry run requested (EnterpriseDryRun / ENTERPRISE_REPO_WHATIF): nothing will be written.'
 
         $publishParam['WhatIf'] = $true
     }
@@ -409,10 +569,12 @@ task Publish_Module_To_EnterpriseRepository {
         if ($failureKind -eq 'Authentication')
         {
             throw (
-                "Authentication or authorisation failure against the enterprise " +
-                "repository '$($configuration.SmbShare)': $rootCause. Verify " +
-                'ENTERPRISE_REPO_CREDENTIAL / ENTERPRISE_REPO_USERNAME / ' +
-                'ENTERPRISE_REPO_PASSWORD and the share level permissions of the build ' +
+                'Authentication or authorisation failure against the enterprise ' +
+                "repository '$($configuration.SmbShare)'. Credential source was " +
+                "'$credentialSource'. Root cause: $rootCause. Verify the credential " +
+                '(-Parameters @{ EnterpriseCredential = (Get-Credential) }, ' +
+                'ENTERPRISE_REPO_CREDENTIAL, ENTERPRISE_REPO_USERNAME / ' +
+                'ENTERPRISE_REPO_PASSWORD) and the share level permissions of the build ' +
                 'service account.'
             )
         }

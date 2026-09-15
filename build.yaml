@@ -93,9 +93,31 @@ BuildWorkflow:
     # Runs LAST on purpose: GitHub and the PowerShell Gallery are the authoritative
     # targets, so an unreachable corporate share must never invalidate them.
     #
-    # Environment variables (see ./.enterprise-repo.env.example):
+    # CONFIGURATION PRECEDENCE (applied per setting, highest first):
+    #   1. ./build.ps1 -Parameters @{ ... }                  <- preferred
+    #   2. Invoke-Build property / session variable ($EnterpriseSmbShare, ...)
+    #   3. ENTERPRISE_REPO_* process environment variables   <- CI/CD injection
+    #   4. ./.enterprise-repo.env (git-ignored, non-secret)
+    #   5. Built-in defaults
+    #
+    # Build parameters (preferred, see ./.enterprise-repo.env.example):
+    #   EnterpriseSmbShare              (required unless ENTERPRISE_REPO_SMB_SHARE is
+    #                                   set) UNC path, e.g. \\FS01\PowerShellRepo.
+    #   EnterpriseCredential            (optional) [PSCredential]. The secret stays a
+    #                                   SecureString inside the process: it never
+    #                                   reaches the environment, the command line or
+    #                                   the shell history. No environment equivalent,
+    #                                   by design.
+    #   EnterpriseCredentialSecretName  (optional) SecretManagement secret name.
+    #   EnterpriseVaultName             (optional) SecretManagement vault name.
+    #   EnterpriseUserName              (optional) e.g. CORP\svc_psrepo.
+    #   EnterpriseModulePath            (optional) Explicit built module folder.
+    #   EnterpriseDryRun                (optional) $true for a dry run.
+    #
+    # Environment variables (unchanged, still fully supported for CI/CD):
     #   ENTERPRISE_REPO_SMB_SHARE    (required) UNC path, e.g. \\FS01\PowerShellRepo.
-    #                                When unset, the task logs and is skipped - the
+    #                                When unset and no EnterpriseSmbShare parameter is
+    #                                supplied, the task logs and is skipped - the
     #                                build does NOT fail.
     #   ENTERPRISE_REPO_CREDENTIAL   (optional) SecretManagement secret name holding a
     #                                PSCredential or a SecureString.
@@ -117,6 +139,17 @@ BuildWorkflow:
 
   # SMB-only publication, without touching GitHub or the PowerShell Gallery.
   # The module must already be built, e.g. ./build.ps1 -Tasks build, publish-enterprise
+  #
+  # Environment-variable form (backward compatible, nothing to change):
+  #   $env:ENTERPRISE_REPO_SMB_SHARE = '\\FS01\PowerShellRepo'
+  #   ./build.ps1 -Tasks build, publish-enterprise
+  #
+  # Parameter form (preferred - the password never leaves the process):
+  #   $publishParam = @{
+  #       EnterpriseSmbShare   = '\\FS01\PowerShellRepo'
+  #       EnterpriseCredential = (Get-Credential 'CORP\svc_psrepo')
+  #   }
+  #   ./build.ps1 -Tasks build, publish-enterprise -Parameters $publishParam
   publish-enterprise:
     - Publish_Module_To_EnterpriseRepository
 
