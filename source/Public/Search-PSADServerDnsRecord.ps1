@@ -1,26 +1,32 @@
 ﻿function Search-PSADServerDnsRecord {
     <#
     .SYNOPSIS
-        Searches AD-integrated DNS records by Name, IP/Target, Nature, and validated Resource Record Type.
+        Searches AD-integrated DNS records by Name, IP/Target, Nature, Resource Record Type, and IP Scope.
     .DESCRIPTION
         Queries Active Directory integrated DNS zones using the DnsServer module.
-        Supports explicit credentials via dynamic CIM session creation to handle remote server authentication cleanly.
+        Filters entries based on record nature (Static vs Dynamic), strictly validated Resource Record Types,
+        and evaluates target IP addresses against an array of IP subnets (CIDR notation or IP prefixes)
+        using high-performance bitwise subnet mask comparisons.
     .PARAMETER SearchTerm
         Optional IP address, IP prefix, HostName, or FQDN pattern to search for. Supports wildcard patterns (*).
     .PARAMETER RecordType
         Filters records by lifecycle nature: Static, Dynamic, or All. Defaults to All.
     .PARAMETER RRType
         Filters records by a validated list of DNS Resource Record Types. Defaults to All.
+    .PARAMETER IPScope
+        Optional array of IP Subnets in CIDR notation (e.g. '10.0.3.0/24', '10.1.0.0/16') or IP prefixes to filter records against.
     .PARAMETER ZoneName
         The target DNS zone name. Defaults to the current Active Directory domain root zone.
     .PARAMETER Server
-        Target Domain Controller or DNS Server. Defaults to the local context.
+        Target Domain Controller or DNS Server. Defaults to local context.
     .PARAMETER Credential
         Optional explicit PSCredential object for authenticating against the remote DNS server via CIM.
     .EXAMPLE
-        Search-PSADServerDnsRecord -RRType 'CNAME' -Server 'caw1pdc03' -Credential (Get-Secret AdmAccount) -Verbose
+        Search-PSADServerDnsRecord -IPScope '10.0.3.0/24' -RecordType Dynamic -Server 'DC01.corp.contoso.com'
     .EXAMPLE
-        Search-PSPSADServerDnsRecord -SearchTerm 'caw1pbastion*' -RRType 'A', 'AAAA' -RecordType All
+        Search-PSADServerDnsRecord -IPScope @('10.0.3.0/24', '10.1.2.0/24') -RRType 'A' -RecordType Static
+    .EXAMPLE
+        Search-PSADServerDnsRecord -SearchTerm 'caw1pbastion*' -RRType 'A' -Server 'DC01.corp.contoso.com' -Credential (Get-Credential)
     #>
     [CmdletBinding()]
     param(
@@ -38,6 +44,10 @@
 
         [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
+        [string[]]$IPScope,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
         [string]$ZoneName,
 
         [Parameter(Mandatory = $false)]
@@ -52,9 +62,55 @@
 
     begin {
         $ErrorActionPreference = 'Stop'
-        Write-Verbose -Message "Initializing DNS Search Session. NatureFilter: [$RecordType], RRTypeFilter: [$($RRType -join ', ')], SearchTerm: [$SearchTerm]"
+        Write-Verbose -Message "Initializing DNS Search Session. NatureFilter: [$RecordType], RRTypeFilter: [$($RRType -join ', ')], IPScopeFilter: [$($IPScope -join ', ')]"
 
         $cimSession = $null
+        $parsedSubnets = [System.Collections.Generic.List[hashtable]]::new()
+
+        # Pre-parse CIDR IP scopes into bitwise byte structures for high-performance matching
+        if ($PSBoundParameters.ContainsKey('IPScope') -and $null -ne $IPScope) {
+            foreach ($scopeItem in $IPScope) {
+                if ([string]::IsNullOrWhiteSpace($scopeItem)) { continue }
+                $cleanScope = $scopeItem.Trim()
+
+                if ($cleanScope.Contains('/')) {
+                    try {
+                        $parts = $cleanScope.Split('/')
+                        $networkIP = [System.Net.IPAddress]::Parse($parts[0])
+                        $cidr = [int]$parts[1]
+                        $netBytes = $networkIP.GetAddressBytes()
+
+                        $maskBytes = [byte[]]::new($netBytes.Length)
+                        $fullBytes = [math]::DivRem($cidr, 8, [ref]$restBits)
+                        for ($i = 0; $i -lt $fullBytes; $i++) { $maskBytes[$i] = 0xff }
+                        if ($restBits -gt 0) { $maskBytes[$fullBytes] = [byte](0xff -shl (8 - $restBits)) }
+
+                        $parsedSubnets.Add(@{
+                            Type         = 'CIDR'
+                            NetworkBytes = $netBytes
+                            MaskBytes    = $maskBytes
+                            Original     = $cleanScope
+                        })
+                    }
+                    catch {
+                        Write-Warning -Message "Failed to parse CIDR scope '$cleanScope'. Falling back to prefix string matching."
+                        $parsedSubnets.Add(@{
+                            Type     = 'Prefix'
+                            Prefix   = $cleanScope.Split('/')[0]
+                            Original = $cleanScope
+                        })
+                    }
+                }
+                else {
+                    $parsedSubnets.Add(@{
+                        Type     = 'Prefix'
+                        Prefix   = $cleanScope
+                        Original = $cleanScope
+                    })
+                }
+            }
+            Write-Verbose -Message "Pre-parsed $($parsedSubnets.Count) IP scope mask(s)."
+        }
 
         # Auto-detect domain root zone if omitted
         if (-not $PSBoundParameters.ContainsKey('ZoneName') -or [string]::IsNullOrWhiteSpace($ZoneName)) {
@@ -77,7 +133,7 @@
                 ErrorAction = 'Stop'
             }
 
-            # Handle remote authentication using CIM Session if Credential or Server is passed
+            # Handle remote authentication using CIM Session if Credential is provided
             if ($PSBoundParameters.ContainsKey('Credential')) {
                 $targetComputer = if ($PSBoundParameters.ContainsKey('Server')) { $Server } else { 'localhost' }
                 Write-Verbose -Message "Establishing authenticated CIM Session to [$targetComputer] with user [$($Credential.UserName)]..."
@@ -130,6 +186,60 @@
                     Default { [string]$record.RecordData.ToString() }
                 }
 
+                # Extract pure IP address for IPScope bitwise evaluation
+                $evalIpAddress = $null
+                if ($record.RecordType -eq 'A') {
+                    $evalIpAddress = [string]$record.RecordData.IPv4Address.IPAddressToString
+                }
+                elseif ($record.RecordType -eq 'AAAA') {
+                    $evalIpAddress = [string]$record.RecordData.IPv6Address.IPAddressToString
+                }
+
+                # Evaluate IPScope Bitwise Filter
+                if ($parsedSubnets.Count -gt 0) {
+                    if ([string]::IsNullOrEmpty($evalIpAddress)) {
+                        continue
+                    }
+
+                    $isScopeMatched = $false
+
+                    foreach ($subnetObj in $parsedSubnets) {
+                        if ($subnetObj.Type -eq 'CIDR') {
+                            try {
+                                $targetIP = [System.Net.IPAddress]::Parse($evalIpAddress)
+                                $targetBytes = $targetIP.GetAddressBytes()
+
+                                if ($targetBytes.Length -eq $subnetObj.NetworkBytes.Length) {
+                                    $byteMatch = $true
+                                    for ($i = 0; $i -lt $targetBytes.Length; $i++) {
+                                        if (($targetBytes[$i] -band $subnetObj.MaskBytes[$i]) -ne ($subnetObj.NetworkBytes[$i] -band $subnetObj.MaskBytes[$i])) {
+                                            $byteMatch = $false
+                                            break
+                                        }
+                                    }
+                                    if ($byteMatch) {
+                                        $isScopeMatched = $true
+                                        break
+                                    }
+                                }
+                            }
+                            catch {
+                                # Ignore parsing errors on non-standard IP formats
+                            }
+                        }
+                        elseif ($subnetObj.Type -eq 'Prefix') {
+                            if ($evalIpAddress.StartsWith($subnetObj.Prefix)) {
+                                $isScopeMatched = $true
+                                break
+                            }
+                        }
+                    }
+
+                    if (-not $isScopeMatched) {
+                        continue
+                    }
+                }
+
                 # Detect FQDN anomalous naming (e.g. host.corp.contoso.com registered inside corp.contoso.com)
                 $rawHostName = $record.HostName
                 $isFqdnAnomaly = $rawHostName.EndsWith(".$ZoneName", [System.StringComparison]::OrdinalIgnoreCase)
@@ -140,7 +250,7 @@
                     $rawHostName
                 }
 
-                # Apply SearchTerm evaluation
+                # Apply SearchTerm evaluation against HostName or TargetData
                 if (-not [string]::IsNullOrWhiteSpace($SearchTerm)) {
                     $cleanPattern = $SearchTerm.Trim()
 
