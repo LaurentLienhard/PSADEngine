@@ -1,10 +1,15 @@
-class DNSRecordSearcher {
+class DNSNetworkSearcher {
     [string]$SearchTerm
     [ValidateSet('Static', 'Dynamic', 'All')]
     [string]$RecordType = 'All'
     [ValidateSet('A', 'AAAA', 'CNAME', 'PTR', 'TXT', 'MX', 'SRV', 'SOA', 'NS', 'All')]
     [string[]]$RRType = @('All')
     [string[]]$IPScope
+    [string]$Subnet
+    [string]$SubnetTemplate
+    [int[]]$SegmentId
+    [ValidateSet('LastUsable', 'FirstUsable', 'None')]
+    [string]$GatewayStrategy = 'LastUsable'
     [string]$ZoneName
     [string]$Server
     [PSCredential]$Credential
@@ -12,23 +17,54 @@ class DNSRecordSearcher {
     hidden [System.Collections.Generic.List[hashtable]]$ParsedSubnets
     hidden [Microsoft.Management.Infrastructure.CimSession]$CimSession
 
-    DNSRecordSearcher() {
+    DNSNetworkSearcher() {
         $this.ParsedSubnets = [System.Collections.Generic.List[hashtable]]::new()
     }
 
-    DNSRecordSearcher([string]$SearchTerm, [string]$RecordType, [string[]]$RRType, [string[]]$IPScope,
-                      [string]$ZoneName, [string]$Server, [PSCredential]$Credential) {
+    DNSNetworkSearcher([string]$SearchTerm, [string]$RecordType, [string[]]$RRType,
+                       [string]$Subnet, [string]$SubnetTemplate, [int[]]$SegmentId,
+                       [string]$ZoneName, [string]$Server, [PSCredential]$Credential) {
         $this.SearchTerm = $SearchTerm
         $this.RecordType = $RecordType
         $this.RRType = $RRType
-        $this.IPScope = $IPScope
+        $this.Subnet = $Subnet
+        $this.SubnetTemplate = $SubnetTemplate
+        $this.SegmentId = $SegmentId
         $this.ZoneName = $ZoneName
         $this.Server = $Server
         $this.Credential = $Credential
         $this.ParsedSubnets = [System.Collections.Generic.List[hashtable]]::new()
     }
 
+    [string] ConvertUInt32ToIPString([uint32]$Value) {
+        $b = [byte[]]::new(4)
+        $b[0] = [byte](($Value -shr 24) -band 0xff)
+        $b[1] = [byte](($Value -shr 16) -band 0xff)
+        $b[2] = [byte](($Value -shr 8) -band 0xff)
+        $b[3] = [byte]($Value -band 0xff)
+        return ([System.Net.IPAddress]::new($b)).IPAddressToString
+    }
+
+    [void] CalculateSubnetsFromTemplate() {
+        if ([string]::IsNullOrWhiteSpace($this.SubnetTemplate) -or $null -eq $this.SegmentId) {
+            return
+        }
+
+        $this.IPScope = [System.Collections.Generic.List[string]]::new()
+        foreach ($id in $this.SegmentId) {
+            $formattedSubnet = $this.SubnetTemplate -f $id
+            $this.IPScope.Add($formattedSubnet)
+        }
+    }
+
     [void] ParseCIDRSubnets() {
+        if ([string]::IsNullOrWhiteSpace($this.Subnet)) {
+            $this.CalculateSubnetsFromTemplate()
+        }
+        else {
+            $this.IPScope = @($this.Subnet)
+        }
+
         if ($null -eq $this.IPScope -or $this.IPScope.Count -eq 0) {
             return
         }
