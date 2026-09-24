@@ -8,8 +8,6 @@ class DNSNetworkSearcher {
     [string]$Subnet
     [string]$SubnetTemplate
     [int[]]$SegmentId
-    [ValidateSet('LastUsable', 'FirstUsable', 'None')]
-    [string]$GatewayStrategy = 'LastUsable'
     [string]$ZoneName
     [string]$Server
     [PSCredential]$Credential
@@ -50,10 +48,8 @@ class DNSNetworkSearcher {
             return
         }
 
-        $this.IPScope = [System.Collections.Generic.List[string]]::new()
-        foreach ($id in $this.SegmentId) {
-            $formattedSubnet = $this.SubnetTemplate -f $id
-            $this.IPScope.Add($formattedSubnet)
+        $this.IPScope = foreach ($id in $this.SegmentId) {
+            $this.SubnetTemplate -f $id
         }
     }
 
@@ -159,7 +155,15 @@ class DNSNetworkSearcher {
     [void] InitializeZoneName() {
         if ([string]::IsNullOrWhiteSpace($this.ZoneName)) {
             try {
-                $this.ZoneName = (Get-ADDomain).DNSRoot
+                $adParams = @{}
+                if (-not [string]::IsNullOrWhiteSpace($this.Server)) { $adParams['Server'] = $this.Server }
+                if ($null -ne $this.Credential) { $adParams['Credential'] = $this.Credential }
+                
+                if (Get-Command Get-ADDomain -ErrorAction SilentlyContinue) {
+                    $this.ZoneName = (Get-ADDomain @adParams).DNSRoot
+                } else {
+                    $this.ZoneName = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
+                }
                 Write-Verbose -Message "No ZoneName provided. Defaulted to AD Domain Root: $($this.ZoneName)"
             }
             catch [System.Exception] {
@@ -201,6 +205,11 @@ class DNSNetworkSearcher {
         }
         elseif (-not [string]::IsNullOrWhiteSpace($this.Server)) {
             $getDnsParams['ComputerName'] = $this.Server
+        }
+
+        if ($null -ne $this.RRType -and $this.RRType.Count -eq 1 -and $this.RRType[0] -ne 'All') {
+            $getDnsParams['RRType'] = $this.RRType[0]
+            Write-Verbose -Message "Applying server-side filter for RRType: $($this.RRType[0])"
         }
 
         Write-Verbose -Message "Fetching raw DNS records from zone [$($this.ZoneName)]..."
@@ -254,8 +263,30 @@ class DNSNetworkSearcher {
                     continue
                 }
 
-                $isDynamic = ($null -ne $record.TimeStamp) -and ($record.TimeStamp -ne [System.TimeSpan]::Zero)
+                $rawTs = $record.TimeStamp
+                if ($null -eq $rawTs -and $null -ne $record.CimInstanceProperties) {
+                    $rawTs = $record.CimInstanceProperties['Timestamp'].Value
+                }
+
+                $isDynamic = $false
+                if ($null -ne $rawTs) {
+                    if ($rawTs -is [datetime]) {
+                        if ($rawTs.Year -gt 1601) { $isDynamic = $true }
+                    } elseif ($rawTs -is [TimeSpan]) {
+                        if ($rawTs -ne [TimeSpan]::Zero) { $isDynamic = $true }
+                    } elseif ($rawTs -is [string]) {
+                        if ($rawTs -ne '0' -and $rawTs -ne '') { $isDynamic = $true }
+                    } elseif ($rawTs -ne 0) {
+                        $isDynamic = $true
+                    }
+                }
+
                 $currentNature = if ($isDynamic) { 'Dynamic' } else { 'Static' }
+
+                $recordAge = $null
+                if ($isDynamic -and $rawTs -is [datetime]) {
+                    $recordAge = ([datetime]::Now - $rawTs)
+                }
 
                 if ($this.RecordType -ne 'All' -and $currentNature -ne $this.RecordType) {
                     continue
@@ -298,6 +329,7 @@ class DNSNetworkSearcher {
                     TargetData        = $targetData
                     IsFqdnAnomaly     = $isFqdnAnomaly
                     TimeStamp         = if ($isDynamic) { $record.TimeStamp } else { 'Static (No TimeStamp)' }
+                    RecordAgeDays     = if ($null -ne $recordAge) { [math]::Round($recordAge.TotalDays, 2) } else { $null }
                     ZoneName          = $this.ZoneName
                 })
             }

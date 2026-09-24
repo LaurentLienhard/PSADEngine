@@ -1,4 +1,5 @@
-﻿function Search-PSADServerDnsRecord {
+function Search-PSADServerDnsRecord
+{
     <#
     .SYNOPSIS
         Searches AD-integrated DNS records by Name, IP/Target, Nature, Resource Record Type, and IP Scope.
@@ -20,9 +21,6 @@
         Requires SegmentId parameter. Mutually exclusive with Subnet.
     .PARAMETER SegmentId
         Array of integer segment/site identifiers to inject into SubnetTemplate. Requires SubnetTemplate parameter.
-    .PARAMETER GatewayStrategy
-        Determines the default gateway IP calculation: FirstUsable, LastUsable, or None. Defaults to LastUsable.
-        (Note: Used internally for subnet calculation; not exposed in DNS search results)
     .PARAMETER ZoneName
         The target DNS zone name. Defaults to the current Active Directory domain root zone.
     .PARAMETER Server
@@ -32,12 +30,12 @@
     .EXAMPLE
         Search-PSADServerDnsRecord -Subnet '10.0.3.0/24' -RecordType Dynamic -Server 'DC01.corp.contoso.com'
     .EXAMPLE
-        Search-PSADServerDnsRecord -SubnetTemplate '10.{0}.2.0/24' -SegmentId 1..5 -RRType 'A' -RecordType Static
+        Search-PSADServerDnsRecord -SubnetTemplate '10.{0}.2.0/24' -SegmentId (1..5) -RRType 'A' -RecordType Static
     .EXAMPLE
         Search-PSADServerDnsRecord -SearchTerm 'caw1pbastion*' -RRType 'A' -Server 'DC01.corp.contoso.com' -Credential (Get-Credential)
     #>
     [CmdletBinding(DefaultParameterSetName = 'Direct')]
-    param(
+    param (
         [Parameter(Mandatory = $false, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
         [string]$SearchTerm,
@@ -63,10 +61,6 @@
         [int[]]$SegmentId,
 
         [Parameter(Mandatory = $false)]
-        [ValidateSet('LastUsable', 'FirstUsable', 'None')]
-        [string]$GatewayStrategy = 'LastUsable',
-
-        [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
         [string]$ZoneName,
 
@@ -87,7 +81,6 @@
     $searcher.Subnet = $Subnet
     $searcher.SubnetTemplate = $SubnetTemplate
     $searcher.SegmentId = $SegmentId
-    $searcher.GatewayStrategy = $GatewayStrategy
     $searcher.ZoneName = $ZoneName
     $searcher.Server = $Server
     $searcher.Credential = $Credential
