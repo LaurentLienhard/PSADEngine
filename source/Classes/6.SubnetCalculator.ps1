@@ -128,5 +128,6 @@ class SubnetCalculator {
             $rootCause = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
             Write-Error -Message "Unhandled error processing scope definition: $rootCause" -ErrorAction Stop
         }
+        return $null
     }
 }

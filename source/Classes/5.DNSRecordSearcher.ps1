@@ -10,7 +10,7 @@ class DNSRecordSearcher {
     [PSCredential]$Credential
 
     hidden [System.Collections.Generic.List[hashtable]]$ParsedSubnets
-    hidden [System.Net.CimSession]$CimSession
+    hidden [Microsoft.Management.Infrastructure.CimSession]$CimSession
 
     DNSRecordSearcher() {
         $this.ParsedSubnets = [System.Collections.Generic.List[hashtable]]::new()
@@ -47,6 +47,7 @@ class DNSRecordSearcher {
                     $netBytes = $networkIP.GetAddressBytes()
 
                     $maskBytes = [byte[]]::new($netBytes.Length)
+                    $restBits = 0
                     $fullBytes = [math]::DivRem($cidr, 8, [ref]$restBits)
                     for ($i = 0; $i -lt $fullBytes; $i++) { $maskBytes[$i] = 0xff }
                     if ($restBits -gt 0) { $maskBytes[$fullBytes] = [byte](0xff -shl (8 - $restBits)) }
@@ -171,7 +172,7 @@ class DNSRecordSearcher {
     }
 
     [string] ExtractTargetData([object]$Record) {
-        return switch ($Record.RecordType) {
+        $data = switch ($Record.RecordType) {
             'A'     { [string]$Record.RecordData.IPv4Address.IPAddressToString }
             'AAAA'  { [string]$Record.RecordData.IPv6Address.IPAddressToString }
             'CNAME' { [string]$Record.RecordData.HostNameAlias }
@@ -181,6 +182,7 @@ class DNSRecordSearcher {
             'SRV'   { [string]"$($Record.RecordData.DomainName):$($Record.RecordData.Port)" }
             Default { [string]$Record.RecordData.ToString() }
         }
+        return [string]$data
     }
 
     [string] ExtractEvalIpAddress([object]$Record) {
@@ -277,5 +279,6 @@ class DNSRecordSearcher {
         finally {
             $this.DisposeCimSession()
         }
+        return $null
     }
 }
