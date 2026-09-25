@@ -4,14 +4,14 @@ function Test-ADSitesAndServicesConfiguration {
         Audite la configuration Sites and Services dans Active Directory.
 
     .DESCRIPTION
-        Réalise un audit complet de la configuration Sites and Services (AD Sites and Services)
+        Réalise un audit complet ou sélectif de la configuration Sites and Services (AD Sites and Services)
         en vérifiant la conformité aux best practices Microsoft et identifie :
         - Sites orphelins (sans subnets assignés)
         - Subnets orphelins (non assignés à un site)
         - Liaisons inter-site invalides ou mal configurées
-        - Couverture incomplète des Domain Controllers
         - Subnets dupliqués ou conflictuels
-        - Site Links sans site source ou destination valide
+        - Site Links avec fréquence de réplication lente
+        - Liaisons SMTP au lieu de RPC
 
     .PARAMETER Forest
         Forêt Active Directory à analyser. Si non spécifié, utilise la forêt actuelle.
@@ -21,6 +21,18 @@ function Test-ADSitesAndServicesConfiguration {
 
     .PARAMETER Credential
         Credentials pour l'accès distant. Si non spécifié, utilise le contexte actuel.
+
+    .PARAMETER AuditType
+        Type d'audit à effectuer. Par défaut, tous les audits sont exécutés.
+        Valeurs valides:
+        - All: Tous les audits (par défaut)
+        - OrphanedSites: Sites sans subnets assignés (SITE-001)
+        - OrphanedSubnets: Subnets non assignés à un site (SUBNET-001)
+        - DuplicateSubnets: Subnets en plusieurs exemplaires (SUBNET-002)
+        - InvalidSiteLinks: Liaisons avec sites inexistants (SITELINK-001)
+        - SlowReplication: Fréquence de réplication > 180 min (SITELINK-002)
+        - SmtpLinks: Liaisons utilisant SMTP au lieu de RPC (SITELINK-003)
+        - IncompleteLinks: Liaisons connectant < 2 sites (SITELINK-004)
 
     .PARAMETER IncludeDetailedReports
         Inclut des rapports détaillés pour chaque catégorie d'erreur.
@@ -32,7 +44,10 @@ function Test-ADSitesAndServicesConfiguration {
         Test-ADSitesAndServicesConfiguration -Forest 'corp.contoso.com' -Verbose
 
     .EXAMPLE
-        Test-ADSitesAndServicesConfiguration -Server DC01 -IncludeDetailedReports
+        Test-ADSitesAndServicesConfiguration -AuditType OrphanedSites, OrphanedSubnets -Server DC01
+
+    .EXAMPLE
+        Test-ADSitesAndServicesConfiguration -AuditType SlowReplication -ExportToCSV
 
     .NOTES
         Requires: Active Directory module (RSAT)
@@ -52,6 +67,19 @@ function Test-ADSitesAndServicesConfiguration {
         [PSCredential]
         [System.Management.Automation.Credential()]
         $Credential,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet(
+            'All',
+            'OrphanedSites',
+            'OrphanedSubnets',
+            'DuplicateSubnets',
+            'InvalidSiteLinks',
+            'SlowReplication',
+            'SmtpLinks',
+            'IncompleteLinks'
+        )]
+        [string[]]$AuditType = 'All',
 
         [Parameter(Mandatory = $false)]
         [switch]$IncludeDetailedReports,
@@ -98,6 +126,13 @@ function Test-ADSitesAndServicesConfiguration {
                 Write-Verbose -Message "Forêt détectée: $Forest"
             }
 
+            # Normaliser les types d'audit
+            if ($AuditType -contains 'All') {
+                $AuditType = @('OrphanedSites', 'OrphanedSubnets', 'DuplicateSubnets', 'InvalidSiteLinks', 'SlowReplication', 'SmtpLinks', 'IncompleteLinks')
+            }
+
+            Write-Verbose -Message "Audits sélectionnés: $($AuditType -join ', ')"
+
             # Récupérer tous les sites
             Write-Verbose -Message "Récupération des sites AD..."
             $adSites = @(Get-ADReplicationSite @adParams -Filter '*' -Properties Description)
@@ -110,145 +145,161 @@ function Test-ADSitesAndServicesConfiguration {
             $summary.SubnetsAnalyzed = $adSubnets.Count
             Write-Verbose -Message "Nombre de subnets trouvés: $($adSubnets.Count)"
 
-            # Récupérer tous les site links
-            Write-Verbose -Message "Récupération des liaisons inter-site..."
-            $adSiteLinks = @(Get-ADReplicationSiteLink @adParams -Filter '*' -Properties ReplicationFrequencyInMinutes, Options)
-            $summary.SiteLinksAnalyzed = $adSiteLinks.Count
-            Write-Verbose -Message "Nombre de liaisons trouvées: $($adSiteLinks.Count)"
+            # Récupérer tous les site links (seulement si nécessaire)
+            if ($AuditType -match 'InvalidSiteLinks|SlowReplication|SmtpLinks|IncompleteLinks') {
+                Write-Verbose -Message "Récupération des liaisons inter-site..."
+                $adSiteLinks = @(Get-ADReplicationSiteLink @adParams -Filter '*' -Properties ReplicationFrequencyInMinutes, Options)
+                $summary.SiteLinksAnalyzed = $adSiteLinks.Count
+                Write-Verbose -Message "Nombre de liaisons trouvées: $($adSiteLinks.Count)"
+            }
 
-            # Audit 1: Sites sans subnets
-            Write-Verbose -Message "Audit 1: Identification des sites orphelins (sans subnets)..."
-            $sitesWithSubnets = @($adSubnets | Select-Object -ExpandProperty Site -Unique)
-            foreach ($site in $adSites) {
-                if ($site.Name -notin $sitesWithSubnets) {
-                    $issue = [PSCustomObject]@{
-                        IssueId       = 'SITE-001'
-                        Severity      = 'CRITICAL'
-                        Category      = 'Site Orphelin'
-                        Description   = "Le site '$($site.Name)' n'a pas de subnet assigné"
-                        AffectedItem  = $site.Name
-                        Impact        = 'Les clients de ce site ne peuvent pas être localisés par les services AD'
-                        Remediation   = "Assigner au moins un subnet au site '$($site.Name)' ou supprimer le site si inutilisé"
-                        Timestamp     = (Get-Date).ToUniversalTime()
+            # Audit: Sites orphelins
+            if ($AuditType -contains 'OrphanedSites') {
+                Write-Verbose -Message "Audit OrphanedSites: Identification des sites orphelins..."
+                $sitesWithSubnets = @($adSubnets | Select-Object -ExpandProperty Site -Unique)
+                foreach ($site in $adSites) {
+                    if ($site.Name -notin $sitesWithSubnets) {
+                        $issue = [PSCustomObject]@{
+                            IssueId       = 'SITE-001'
+                            Severity      = 'CRITICAL'
+                            Category      = 'Site Orphelin'
+                            Description   = "Le site '$($site.Name)' n'a pas de subnet assigné"
+                            AffectedItem  = $site.Name
+                            Impact        = 'Les clients de ce site ne peuvent pas être localisés par les services AD'
+                            Remediation   = "Assigner au moins un subnet au site '$($site.Name)' ou supprimer le site si inutilisé"
+                            Timestamp     = (Get-Date).ToUniversalTime()
+                        }
+                        $issues.Add($issue)
+                        Write-Warning -Message "CRITICAL: Site orphelin détecté: $($site.Name)"
                     }
-                    $issues.Add($issue)
-                    Write-Warning -Message "CRITICAL: Site orphelin détecté: $($site.Name)"
                 }
             }
 
-            # Audit 2: Subnets orphelins
-            Write-Verbose -Message "Audit 2: Identification des subnets orphelins..."
-            foreach ($subnet in $adSubnets) {
-                if ([string]::IsNullOrEmpty($subnet.Site)) {
-                    $issue = [PSCustomObject]@{
-                        IssueId       = 'SUBNET-001'
-                        Severity      = 'CRITICAL'
-                        Category      = 'Subnet Orphelin'
-                        Description   = "Le subnet '$($subnet.Name)' n'est assigné à aucun site"
-                        AffectedItem  = $subnet.Name
-                        Impact        = 'Ce subnet ne sera pas utilisé pour la localisation de sites'
-                        Remediation   = "Assigner le subnet '$($subnet.Name)' à un site ou le supprimer"
-                        Timestamp     = (Get-Date).ToUniversalTime()
+            # Audit: Subnets orphelins
+            if ($AuditType -contains 'OrphanedSubnets') {
+                Write-Verbose -Message "Audit OrphanedSubnets: Identification des subnets orphelins..."
+                foreach ($subnet in $adSubnets) {
+                    if ([string]::IsNullOrEmpty($subnet.Site)) {
+                        $issue = [PSCustomObject]@{
+                            IssueId       = 'SUBNET-001'
+                            Severity      = 'CRITICAL'
+                            Category      = 'Subnet Orphelin'
+                            Description   = "Le subnet '$($subnet.Name)' n'est assigné à aucun site"
+                            AffectedItem  = $subnet.Name
+                            Impact        = 'Ce subnet ne sera pas utilisé pour la localisation de sites'
+                            Remediation   = "Assigner le subnet '$($subnet.Name)' à un site ou le supprimer"
+                            Timestamp     = (Get-Date).ToUniversalTime()
+                        }
+                        $issues.Add($issue)
+                        Write-Warning -Message "CRITICAL: Subnet orphelin détecté: $($subnet.Name)"
                     }
-                    $issues.Add($issue)
-                    Write-Warning -Message "CRITICAL: Subnet orphelin détecté: $($subnet.Name)"
                 }
             }
 
-            # Audit 3: Subnets dupliqués ou conflictuels
-            Write-Verbose -Message "Audit 3: Vérification des subnets dupliqués..."
-            $subnetNames = $adSubnets | Group-Object -Property Name
-            foreach ($group in $subnetNames | Where-Object { $_.Count -gt 1 }) {
-                $issue = [PSCustomObject]@{
-                    IssueId       = 'SUBNET-002'
-                    Severity      = 'WARNING'
-                    Category      = 'Subnet Dupliqué'
-                    Description   = "Le subnet '$($group.Name)' existe en plusieurs exemplaires ($($group.Count) fois)"
-                    AffectedItem  = $group.Name
-                    Impact        = 'Comportement imprévisible lors de la localisation de sites'
-                    Remediation   = "Fusionner ou supprimer les doublons pour le subnet '$($group.Name)'"
-                    Timestamp     = (Get-Date).ToUniversalTime()
-                }
-                $issues.Add($issue)
-                Write-Warning -Message "WARNING: Subnet dupliqué détecté: $($group.Name)"
-            }
-
-            # Audit 4: Site Links sans sites valides
-            Write-Verbose -Message "Audit 4: Vérification des liaisons inter-site..."
-            $validSiteNames = @($adSites | Select-Object -ExpandProperty Name)
-            foreach ($siteLink in $adSiteLinks) {
-                $invalidSites = @($siteLink.SitesIncluded | Where-Object { $_ -notin $validSiteNames })
-                if ($invalidSites.Count -gt 0) {
+            # Audit: Subnets dupliqués
+            if ($AuditType -contains 'DuplicateSubnets') {
+                Write-Verbose -Message "Audit DuplicateSubnets: Vérification des subnets dupliqués..."
+                $subnetNames = $adSubnets | Group-Object -Property Name
+                foreach ($group in $subnetNames | Where-Object { $_.Count -gt 1 }) {
                     $issue = [PSCustomObject]@{
-                        IssueId       = 'SITELINK-001'
-                        Severity      = 'CRITICAL'
-                        Category      = 'Site Link Invalide'
-                        Description   = "La liaison '$($siteLink.Name)' référence des sites inexistants: $($invalidSites -join ', ')"
-                        AffectedItem  = $siteLink.Name
-                        Impact        = 'La réplication inter-site ne fonctionnera pas correctement'
-                        Remediation   = "Corriger ou supprimer la liaison '$($siteLink.Name)'"
-                        Timestamp     = (Get-Date).ToUniversalTime()
-                    }
-                    $issues.Add($issue)
-                    Write-Warning -Message "CRITICAL: Site Link invalide détecté: $($siteLink.Name)"
-                }
-            }
-
-            # Audit 5: Site Links avec configuration de réplication faible
-            Write-Verbose -Message "Audit 5: Vérification de la fréquence de réplication..."
-            foreach ($siteLink in $adSiteLinks) {
-                if ($siteLink.ReplicationFrequencyInMinutes -gt 180) {
-                    $issue = [PSCustomObject]@{
-                        IssueId       = 'SITELINK-002'
+                        IssueId       = 'SUBNET-002'
                         Severity      = 'WARNING'
-                        Category      = 'Réplication Lente'
-                        Description   = "La liaison '$($siteLink.Name)' a une fréquence de réplication élevée: $($siteLink.ReplicationFrequencyInMinutes) minutes"
-                        AffectedItem  = $siteLink.Name
-                        Impact        = 'La propagation des changements AD sera lente (>3h entre les DCs)'
-                        Remediation   = "Réduire la fréquence de réplication pour la liaison '$($siteLink.Name)' (recommandé: 15-60 min)"
+                        Category      = 'Subnet Dupliqué'
+                        Description   = "Le subnet '$($group.Name)' existe en plusieurs exemplaires ($($group.Count) fois)"
+                        AffectedItem  = $group.Name
+                        Impact        = 'Comportement imprévisible lors de la localisation de sites'
+                        Remediation   = "Fusionner ou supprimer les doublons pour le subnet '$($group.Name)'"
                         Timestamp     = (Get-Date).ToUniversalTime()
                     }
                     $issues.Add($issue)
-                    Write-Warning -Message "WARNING: Réplication lente détectée sur liaison: $($siteLink.Name)"
+                    Write-Warning -Message "WARNING: Subnet dupliqué détecté: $($group.Name)"
                 }
             }
 
-            # Audit 6: Liaison SMTP au lieu de RPC
-            Write-Verbose -Message "Audit 6: Vérification du protocole de liaison..."
-            foreach ($siteLink in $adSiteLinks) {
-                $isSmtpOnly = ($siteLink.Options -band 0x00000004) -eq 0x00000004
-                if ($isSmtpOnly) {
-                    $issue = [PSCustomObject]@{
-                        IssueId       = 'SITELINK-003'
-                        Severity      = 'WARNING'
-                        Category      = 'Liaison SMTP'
-                        Description   = "La liaison '$($siteLink.Name)' utilise SMTP au lieu de RPC"
-                        AffectedItem  = $siteLink.Name
-                        Impact        = 'Réplication moins fiable et moins efficace qu''avec RPC'
-                        Remediation   = "Remplacer par une liaison RPC si possible pour '$($siteLink.Name)'"
-                        Timestamp     = (Get-Date).ToUniversalTime()
+            # Audit: Site Links invalides
+            if ($AuditType -contains 'InvalidSiteLinks') {
+                Write-Verbose -Message "Audit InvalidSiteLinks: Vérification des liaisons inter-site..."
+                $validSiteNames = @($adSites | Select-Object -ExpandProperty Name)
+                foreach ($siteLink in $adSiteLinks) {
+                    $invalidSites = @($siteLink.SitesIncluded | Where-Object { $_ -notin $validSiteNames })
+                    if ($invalidSites.Count -gt 0) {
+                        $issue = [PSCustomObject]@{
+                            IssueId       = 'SITELINK-001'
+                            Severity      = 'CRITICAL'
+                            Category      = 'Site Link Invalide'
+                            Description   = "La liaison '$($siteLink.Name)' référence des sites inexistants: $($invalidSites -join ', ')"
+                            AffectedItem  = $siteLink.Name
+                            Impact        = 'La réplication inter-site ne fonctionnera pas correctement'
+                            Remediation   = "Corriger ou supprimer la liaison '$($siteLink.Name)'"
+                            Timestamp     = (Get-Date).ToUniversalTime()
+                        }
+                        $issues.Add($issue)
+                        Write-Warning -Message "CRITICAL: Site Link invalide détecté: $($siteLink.Name)"
                     }
-                    $issues.Add($issue)
-                    Write-Warning -Message "WARNING: Liaison SMTP détectée sur: $($siteLink.Name)"
                 }
             }
 
-            # Audit 7: Vérifier la symétrie des liaisons
-            Write-Verbose -Message "Audit 7: Vérification de la symétrie des liaisons..."
-            foreach ($siteLink in $adSiteLinks) {
-                if ($siteLink.SitesIncluded.Count -lt 2) {
-                    $issue = [PSCustomObject]@{
-                        IssueId       = 'SITELINK-004'
-                        Severity      = 'CRITICAL'
-                        Category      = 'Liaison Incomplète'
-                        Description   = "La liaison '$($siteLink.Name)' connecte moins de 2 sites ($($siteLink.SitesIncluded.Count))"
-                        AffectedItem  = $siteLink.Name
-                        Impact        = 'La liaison ne relie aucun site (non fonctionnelle)'
-                        Remediation   = "Ajouter au moins 2 sites à la liaison '$($siteLink.Name)' ou la supprimer"
-                        Timestamp     = (Get-Date).ToUniversalTime()
+            # Audit: Réplication lente
+            if ($AuditType -contains 'SlowReplication') {
+                Write-Verbose -Message "Audit SlowReplication: Vérification de la fréquence de réplication..."
+                foreach ($siteLink in $adSiteLinks) {
+                    if ($siteLink.ReplicationFrequencyInMinutes -gt 180) {
+                        $issue = [PSCustomObject]@{
+                            IssueId       = 'SITELINK-002'
+                            Severity      = 'WARNING'
+                            Category      = 'Réplication Lente'
+                            Description   = "La liaison '$($siteLink.Name)' a une fréquence de réplication élevée: $($siteLink.ReplicationFrequencyInMinutes) minutes"
+                            AffectedItem  = $siteLink.Name
+                            Impact        = 'La propagation des changements AD sera lente (>3h entre les DCs)'
+                            Remediation   = "Réduire la fréquence de réplication pour la liaison '$($siteLink.Name)' (recommandé: 15-60 min)"
+                            Timestamp     = (Get-Date).ToUniversalTime()
+                        }
+                        $issues.Add($issue)
+                        Write-Warning -Message "WARNING: Réplication lente détectée sur liaison: $($siteLink.Name)"
                     }
-                    $issues.Add($issue)
-                    Write-Warning -Message "CRITICAL: Liaison incomplète détectée: $($siteLink.Name)"
+                }
+            }
+
+            # Audit: Liaisons SMTP
+            if ($AuditType -contains 'SmtpLinks') {
+                Write-Verbose -Message "Audit SmtpLinks: Vérification du protocole de liaison..."
+                foreach ($siteLink in $adSiteLinks) {
+                    $isSmtpOnly = ($siteLink.Options -band 0x00000004) -eq 0x00000004
+                    if ($isSmtpOnly) {
+                        $issue = [PSCustomObject]@{
+                            IssueId       = 'SITELINK-003'
+                            Severity      = 'WARNING'
+                            Category      = 'Liaison SMTP'
+                            Description   = "La liaison '$($siteLink.Name)' utilise SMTP au lieu de RPC"
+                            AffectedItem  = $siteLink.Name
+                            Impact        = 'Réplication moins fiable et moins efficace qu''avec RPC'
+                            Remediation   = "Remplacer par une liaison RPC si possible pour '$($siteLink.Name)'"
+                            Timestamp     = (Get-Date).ToUniversalTime()
+                        }
+                        $issues.Add($issue)
+                        Write-Warning -Message "WARNING: Liaison SMTP détectée sur: $($siteLink.Name)"
+                    }
+                }
+            }
+
+            # Audit: Liaisons incomplètes
+            if ($AuditType -contains 'IncompleteLinks') {
+                Write-Verbose -Message "Audit IncompleteLinks: Vérification de la complétude des liaisons..."
+                foreach ($siteLink in $adSiteLinks) {
+                    if ($siteLink.SitesIncluded.Count -lt 2) {
+                        $issue = [PSCustomObject]@{
+                            IssueId       = 'SITELINK-004'
+                            Severity      = 'CRITICAL'
+                            Category      = 'Liaison Incomplète'
+                            Description   = "La liaison '$($siteLink.Name)' connecte moins de 2 sites ($($siteLink.SitesIncluded.Count))"
+                            AffectedItem  = $siteLink.Name
+                            Impact        = 'La liaison ne relie aucun site (non fonctionnelle)'
+                            Remediation   = "Ajouter au moins 2 sites à la liaison '$($siteLink.Name)' ou la supprimer"
+                            Timestamp     = (Get-Date).ToUniversalTime()
+                        }
+                        $issues.Add($issue)
+                        Write-Warning -Message "CRITICAL: Liaison incomplète détectée: $($siteLink.Name)"
+                    }
                 }
             }
 

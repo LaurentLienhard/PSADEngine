@@ -22,6 +22,33 @@ Test-ADSitesAndServicesConfiguration [[-Forest] <string>] [[-Server] <string>] [
 
 ## Paramètres
 
+### AuditType
+- **Type**: String[] avec ValidateSet
+- **Requis**: Non
+- **Valeur par défaut**: 'All'
+- **Valeurs acceptées**:
+  - `All` — Exécute tous les audits (défaut)
+  - `OrphanedSites` — Sites sans subnets assignés (SITE-001)
+  - `OrphanedSubnets` — Subnets non assignés à un site (SUBNET-001)
+  - `DuplicateSubnets` — Subnets en plusieurs exemplaires (SUBNET-002)
+  - `InvalidSiteLinks` — Liaisons avec sites inexistants (SITELINK-001)
+  - `SlowReplication` — Fréquence de réplication > 180 min (SITELINK-002)
+  - `SmtpLinks` — Liaisons utilisant SMTP au lieu de RPC (SITELINK-003)
+  - `IncompleteLinks` — Liaisons connectant < 2 sites (SITELINK-004)
+
+- **Description**: Permet de sélectionner les audits à exécuter pour une performance optimale
+
+```powershell
+# Vérifier seulement les subnets orphelins
+Test-ADSitesAndServicesConfiguration -AuditType OrphanedSubnets
+
+# Vérifier subnets et sites orphelins
+Test-ADSitesAndServicesConfiguration -AuditType OrphanedSites, OrphanedSubnets
+
+# Vérifier uniquement les problèmes de réplication
+Test-ADSitesAndServicesConfiguration -AuditType SlowReplication, SmtpLinks, InvalidSiteLinks
+```
+
 ### Forest
 - **Type**: String
 - **Requis**: Non
@@ -117,6 +144,28 @@ Génère un fichier: `ADSitesAudit_20260925_103045.csv`
 $creds = Get-Credential 'CORP\Administrator'
 Test-ADSitesAndServicesConfiguration -Server 'DC01' -Credential $creds
 ```
+
+### Exemple 5: Audit sélectif - Seulement sites orphelins
+
+```powershell
+Test-ADSitesAndServicesConfiguration -AuditType OrphanedSites -Verbose
+```
+
+**Avantage**: Plus rapide que l'audit complet (pas de vérification des liaisons)
+
+### Exemple 6: Audit sélectif - Sites et subnets orphelins
+
+```powershell
+Test-ADSitesAndServicesConfiguration -AuditType OrphanedSites, OrphanedSubnets -ExportToCSV
+```
+
+### Exemple 7: Audit sélectif - Problèmes de réplication uniquement
+
+```powershell
+Test-ADSitesAndServicesConfiguration -AuditType SlowReplication, SmtpLinks, InvalidSiteLinks -Verbose
+```
+
+**Cas d'usage**: Auditer les performances de réplication inter-site sans vérifier les subnets
 
 ## Structure des résultats
 
